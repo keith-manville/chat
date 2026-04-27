@@ -21,6 +21,10 @@ on:
         description: "Optional: paste an Anthropic API key to enable AI persona auto-replies."
         required: false
         default: ""
+      admin_token:
+        description: "Optional: admin token for /admin. Leave blank to auto-generate."
+        required: false
+        default: ""
 
 concurrency:
   group: launch-preview
@@ -55,11 +59,21 @@ jobs:
           sudo dpkg -i /tmp/cloudflared.deb
           cloudflared --version
 
-      - name: Generate admin token
+      - name: Resolve admin token
         id: token
+        env:
+          INPUT_TOKEN: ${{ inputs.admin_token }}
         run: |
-          TOKEN="$(openssl rand -hex 16)"
-          echo "::add-mask::${TOKEN}"
+          if [ -n "$INPUT_TOKEN" ]; then
+            TOKEN="$INPUT_TOKEN"
+            echo "Using admin token supplied via workflow input."
+          else
+            TOKEN="$(openssl rand -hex 16)"
+            echo "Generated random admin token."
+          fi
+          # Intentionally NOT masked: the run summary is the only place the
+          # generated value is surfaced, and the summary is gated by the same
+          # repo access that gates workflow_dispatch in the first place.
           echo "admin_token=${TOKEN}" >> "$GITHUB_OUTPUT"
 
       - name: Start chat server
