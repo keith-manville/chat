@@ -530,3 +530,29 @@ body.admin {
   max-height: 240px; overflow: auto;
   white-space: pre-wrap;
 }
+
+.active-banner {
+  display: flex; align-items: center; justify-content: space-between;
+  gap: 12px; flex-wrap: wrap;
+  padding: 12px 16px;
+  margin-bottom: 14px;
+  background: #EAF3FA;
+  border: 1px solid #BFD8EA;
+  border-radius: 8px;
+  font-size: 14px;
+}
+.active-banner[hidden] { display: none; }
+.active-banner strong { margin-left: 8px; }
+.active-banner code { background: #fff; padding: 1px 4px; border-radius: 3px; }
+
+.source-pill {
+  font-size: 10px; padding: 1px 5px; border-radius: 3px;
+  font-weight: 800; letter-spacing: 0.04em;
+}
+.source-pill.local  { background: #E1E1E1; color: #555; }
+.source-pill.github { background: #1F2328; color: #fff; }
+
+.scenario-row { width: 100%; display: flex; flex-direction: column; gap: 4px; }
+.scenario-row .row-top { display: flex; align-items: center; gap: 6px; }
+.scenario-row .row-actions { display: flex; gap: 4px; flex-wrap: wrap; }
+.scenario-row .row-actions button { padding: 4px 8px; margin-top: 0; font-size: 12px; }

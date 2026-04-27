@@ -8,6 +8,12 @@ const { db, defaultWorkspaceId } = require('./db');
 const { newId, pickAvatarColor } = require('./lib/util');
 const personas = require('./lib/personas');
 const scenarios = require('./lib/scenarios');
+const github = require('./lib/github');
+
+const SCENARIO_REPO_DEFAULT = process.env.SCENARIO_REPO || '';
+const SCENARIO_REPO_REF_DEFAULT = process.env.SCENARIO_REPO_REF || 'main';
+const SCENARIO_REPO_PATH_DEFAULT = process.env.SCENARIO_REPO_PATH || 'scenarios';
+const SCENARIO_REPO_TOKEN_DEFAULT = process.env.SCENARIO_REPO_TOKEN || '';
 
 const app = express();
 const server = http.createServer(app);
@@ -311,21 +317,116 @@ app.get('/api/admin/scenarios/:id', requireAdmin, (req, res) => {
 });
 
 app.post('/api/admin/scenarios', requireAdmin, (req, res) => {
-  const { id, name, description, definition } = req.body || {};
+  const { id, name, description, briefing, definition } = req.body || {};
   if (!name || !definition) return res.status(400).json({ error: 'missing_fields' });
-  const sid = scenarios.saveScenario({
+  const sid = scenarios.saveLocalScenario({
     id,
     workspaceId: defaultWorkspaceId,
     name,
     description,
+    briefing,
     definition,
   });
   res.json({ id: sid });
 });
 
 app.delete('/api/admin/scenarios/:id', requireAdmin, (req, res) => {
+  // If we deleted the active scenario, clear it.
+  const active = scenarios.getActiveScenario(defaultWorkspaceId);
+  if (active && active.id === req.params.id) {
+    scenarios.setActiveScenario({ workspaceId: defaultWorkspaceId, scenarioId: null });
+  }
   scenarios.deleteScenario(req.params.id);
   res.json({ ok: true });
+});
+
+// ---- Active scenario / state ----
+
+app.get('/api/admin/state', requireAdmin, (_req, res) => {
+  const active = scenarios.getActiveScenario(defaultWorkspaceId);
+  res.json({
+    activeScenario: active
+      ? {
+          id: active.id,
+          name: active.name,
+          description: active.description,
+          briefing: active.briefing,
+          source: active.source,
+          sourceRef: active.sourceRef,
+        }
+      : null,
+    repoConfig: {
+      repo: SCENARIO_REPO_DEFAULT,
+      ref: SCENARIO_REPO_REF_DEFAULT,
+      path: SCENARIO_REPO_PATH_DEFAULT,
+      hasEnvToken: !!SCENARIO_REPO_TOKEN_DEFAULT,
+    },
+    aiEnabled: !!personas.getAnthropic(),
+  });
+});
+
+app.post('/api/admin/scenarios/:id/load', requireAdmin, (req, res) => {
+  const sc = scenarios.getScenario(req.params.id);
+  if (!sc) return res.status(404).json({ error: 'not_found' });
+  scenarios.setActiveScenario({ workspaceId: defaultWorkspaceId, scenarioId: sc.id });
+  // Ensure personas exist + are joined to all public channels so they can speak.
+  const bots = scenarios.ensureScenarioPersonas({ workspaceId: defaultWorkspaceId, scenario: sc });
+  const publicChans = db
+    .prepare('SELECT id FROM channels WHERE workspace_id = ? AND is_private = 0')
+    .all(defaultWorkspaceId);
+  for (const bot of bots) {
+    for (const c of publicChans) ensureMembership(c.id, bot.id);
+  }
+  res.json({
+    ok: true,
+    activeScenario: { id: sc.id, name: sc.name, description: sc.description },
+    personasReady: bots.length,
+  });
+});
+
+app.post('/api/admin/scenarios/unload', requireAdmin, (_req, res) => {
+  scenarios.setActiveScenario({ workspaceId: defaultWorkspaceId, scenarioId: null });
+  res.json({ ok: true });
+});
+
+// ---- GitHub sync ----
+
+app.post('/api/admin/github/sync', requireAdmin, async (req, res) => {
+  const repo = (req.body && req.body.repo) || SCENARIO_REPO_DEFAULT;
+  const ref = (req.body && req.body.ref) || SCENARIO_REPO_REF_DEFAULT;
+  const dirPath = (req.body && req.body.path) || SCENARIO_REPO_PATH_DEFAULT;
+  const token = (req.body && req.body.token) || SCENARIO_REPO_TOKEN_DEFAULT;
+  if (!repo) return res.status(400).json({ error: 'repo required (owner/name)' });
+  if (!token) return res.status(400).json({ error: 'token required (PAT or env SCENARIO_REPO_TOKEN)' });
+
+  try {
+    const results = await github.pullScenarios({ repo, ref, path: dirPath, token });
+    let added = 0;
+    let updated = 0;
+    let unchanged = 0;
+    const errors = [];
+    for (const r of results) {
+      if (!r.ok) {
+        errors.push({ path: r.path, error: r.error });
+        continue;
+      }
+      const out = scenarios.upsertGithubScenario({
+        workspaceId: defaultWorkspaceId,
+        name: r.scenario.name,
+        description: r.scenario.description,
+        briefing: r.scenario.briefing,
+        definition: r.scenario.definition,
+        sourceRef: r.sourceRef,
+        sourceSha: r.sourceSha,
+      });
+      if (out.status === 'added') added++;
+      else if (out.status === 'updated') updated++;
+      else unchanged++;
+    }
+    res.json({ ok: true, repo, ref, path: dirPath, added, updated, unchanged, errors });
+  } catch (err) {
+    res.status(400).json({ error: err.message });
+  }
 });
 
 const activeRuns = new Map(); // scenarioId -> handle

@@ -14,6 +14,12 @@ services:
       - DEFAULT_WORKSPACE_NAME=${DEFAULT_WORKSPACE_NAME:-CTF Workspace}
       # Model for persona replies (defaults to Haiku 4.5).
       - PERSONA_MODEL=${PERSONA_MODEL:-claude-haiku-4-5-20251001}
+      # Optional defaults for the GitHub scenarios sync form. PAT can also be
+      # entered in the UI (and is then session-only, never written to disk).
+      - SCENARIO_REPO=${SCENARIO_REPO:-}
+      - SCENARIO_REPO_REF=${SCENARIO_REPO_REF:-main}
+      - SCENARIO_REPO_PATH=${SCENARIO_REPO_PATH:-scenarios}
+      - SCENARIO_REPO_TOKEN=${SCENARIO_REPO_TOKEN:-}
     volumes:
       - chat-data:/data
     restart: unless-stopped

@@ -142,6 +142,32 @@ for i in {1..20}; do
 done
 node -e "const j=JSON.parse(process.argv[1]); if(!j.messages.some(m=>m.body==='scenario hello')) process.exit(1)" "${MSGS}"
 
+echo "==> Active scenario load/unload"
+curl -fsS -X POST -H "x-admin-token: ${ADMIN_TOKEN}" \
+  "${BASE}/api/admin/scenarios/${SC_ID}/load" >/dev/null
+echo "  ok  POST /api/admin/scenarios/:id/load"
+
+STATE=$(curl -fsS -H "x-admin-token: ${ADMIN_TOKEN}" "${BASE}/api/admin/state")
+node -e "const j=JSON.parse(process.argv[1]); if(!j.activeScenario||j.activeScenario.id!==process.argv[2]) process.exit(1)" "${STATE}" "${SC_ID}"
+echo "  ok  GET /api/admin/state shows active scenario"
+
+curl -fsS -X POST -H "x-admin-token: ${ADMIN_TOKEN}" \
+  "${BASE}/api/admin/scenarios/unload" >/dev/null
+STATE=$(curl -fsS -H "x-admin-token: ${ADMIN_TOKEN}" "${BASE}/api/admin/state")
+node -e "const j=JSON.parse(process.argv[1]); if(j.activeScenario) process.exit(1)" "${STATE}"
+echo "  ok  POST /api/admin/scenarios/unload clears active"
+
+echo "==> GitHub sync input validation"
+assert_status 400 "POST /api/admin/github/sync with no repo" \
+  -X POST -H 'Content-Type: application/json' \
+  -H "x-admin-token: ${ADMIN_TOKEN}" \
+  -d '{}' "${BASE}/api/admin/github/sync"
+
+assert_status 400 "POST /api/admin/github/sync with no token" \
+  -X POST -H 'Content-Type: application/json' \
+  -H "x-admin-token: ${ADMIN_TOKEN}" \
+  -d '{"repo":"acme/scenarios"}' "${BASE}/api/admin/github/sync"
+
 curl -fsS -X DELETE -H "x-admin-token: ${ADMIN_TOKEN}" \
   "${BASE}/api/admin/scenarios/${SC_ID}" >/dev/null
 echo "  ok  DELETE /api/admin/scenarios/:id"

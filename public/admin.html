@@ -66,18 +66,51 @@
 
       <section class="admin-panel" data-panel="scenarios">
         <h2>Scenarios</h2>
+
+        <div id="active-banner" class="active-banner" hidden>
+          <div>
+            <span class="pill" style="background:#1164A3;color:#fff;">ACTIVE</span>
+            <strong id="active-name"></strong>
+            <span class="muted" id="active-desc" style="margin-left:8px;"></span>
+          </div>
+          <button id="active-unload" class="ghost" style="padding:6px 12px;">Unload</button>
+        </div>
+
+        <div class="admin-card" style="margin-bottom:14px;">
+          <h3>Sync from GitHub</h3>
+          <p class="muted" style="font-size:12px;margin:0 0 8px;">
+            Pulls every <code>*.json</code> file under the chosen path. The PAT
+            stays in your browser session — it is not persisted on the server.
+          </p>
+          <div style="display:grid;grid-template-columns:2fr 1fr 1fr;gap:8px;">
+            <div><label>Repository (owner/name)</label><input id="gh-repo" placeholder="acme/ctf-scenarios" /></div>
+            <div><label>Ref (branch / tag / sha)</label><input id="gh-ref" placeholder="main" /></div>
+            <div><label>Path</label><input id="gh-path" placeholder="scenarios" /></div>
+          </div>
+          <label>Personal Access Token (PAT, fine-grained, Contents: read)</label>
+          <input id="gh-token" type="password" placeholder="github_pat_..." autocomplete="off" />
+          <div style="display:flex;gap:8px;align-items:center;margin-top:10px;">
+            <button id="gh-sync">Sync now</button>
+            <button id="gh-forget" class="ghost" type="button">Forget token</button>
+            <span class="muted" id="gh-status" style="font-size:12px;"></span>
+          </div>
+        </div>
+
         <div class="admin-grid">
           <div class="admin-card">
-            <h3>New / edit scenario</h3>
+            <h3>New / edit scenario (local)</h3>
             <label>Name</label>
             <input id="s-name" placeholder="Phishing incident — Hour 1" />
             <label>Description</label>
             <input id="s-desc" placeholder="Initial detection through containment" />
-            <label>Definition (JSON)</label>
+            <label>Briefing (used to ground AI replies — what's happening in the world)</label>
+            <textarea id="s-brief" placeholder="It is Tuesday 09:14. Acme Corp's finance team..." style="min-height:80px;"></textarea>
+            <label>Definition (JSON: personas + events)</label>
             <textarea id="s-def" spellcheck="false"></textarea>
             <div style="display:flex;gap:8px;">
               <button id="s-save">Save scenario</button>
-              <button id="s-load-example" class="ghost">Load example</button>
+              <button id="s-load-example" class="ghost" type="button">Load example</button>
+              <button id="s-clear" class="ghost" type="button">Clear</button>
             </div>
             <p class="error" id="s-error"></p>
           </div>

@@ -72,7 +72,30 @@ CREATE TABLE IF NOT EXISTS scenarios (
   created_at INTEGER NOT NULL,
   FOREIGN KEY (workspace_id) REFERENCES workspaces(id) ON DELETE CASCADE
 );
+
+CREATE TABLE IF NOT EXISTS app_state (
+  workspace_id TEXT PRIMARY KEY,
+  active_scenario_id TEXT,
+  updated_at INTEGER,
+  FOREIGN KEY (workspace_id) REFERENCES workspaces(id) ON DELETE CASCADE
+);
 `);
+
+// Idempotent migrations for older databases.
+function addColumnIfMissing(table, name, ddl) {
+  const cols = db.prepare(`PRAGMA table_info(${table})`).all();
+  if (!cols.some((c) => c.name === name)) {
+    db.exec(`ALTER TABLE ${table} ADD COLUMN ${name} ${ddl}`);
+  }
+}
+addColumnIfMissing('scenarios', 'source', "TEXT NOT NULL DEFAULT 'local'");
+addColumnIfMissing('scenarios', 'source_ref', 'TEXT');
+addColumnIfMissing('scenarios', 'source_sha', 'TEXT');
+addColumnIfMissing('scenarios', 'briefing', 'TEXT');
+addColumnIfMissing('scenarios', 'updated_at', 'INTEGER');
+
+db.exec(`CREATE UNIQUE INDEX IF NOT EXISTS idx_scenarios_source_ref
+         ON scenarios(source_ref) WHERE source_ref IS NOT NULL;`);
 
 function bootstrap() {
   const existing = db.prepare('SELECT id FROM workspaces LIMIT 1').get();
