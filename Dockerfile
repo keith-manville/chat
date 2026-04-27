@@ -25,7 +25,7 @@ COPY db.js ./
 COPY lib ./lib
 COPY public ./public
 
-RUN mkdir -p /data
+RUN mkdir -p /data && chown -R node:node /data /app
 VOLUME ["/data"]
 
 EXPOSE 3000
