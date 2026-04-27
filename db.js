@@ -63,6 +63,17 @@ CREATE TABLE IF NOT EXISTS messages (
 
 CREATE INDEX IF NOT EXISTS idx_messages_channel ON messages(channel_id, created_at);
 
+CREATE TABLE IF NOT EXISTS message_reactions (
+  message_id TEXT NOT NULL,
+  user_id TEXT NOT NULL,
+  emoji TEXT NOT NULL,
+  created_at INTEGER NOT NULL,
+  PRIMARY KEY (message_id, user_id, emoji),
+  FOREIGN KEY (message_id) REFERENCES messages(id) ON DELETE CASCADE,
+  FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+);
+CREATE INDEX IF NOT EXISTS idx_reactions_msg ON message_reactions(message_id);
+
 CREATE TABLE IF NOT EXISTS scenarios (
   id TEXT PRIMARY KEY,
   workspace_id TEXT NOT NULL,
@@ -93,6 +104,11 @@ addColumnIfMissing('scenarios', 'source_ref', 'TEXT');
 addColumnIfMissing('scenarios', 'source_sha', 'TEXT');
 addColumnIfMissing('scenarios', 'briefing', 'TEXT');
 addColumnIfMissing('scenarios', 'updated_at', 'INTEGER');
+
+addColumnIfMissing('messages', 'parent_id', 'TEXT');
+addColumnIfMissing('messages', 'reply_count', 'INTEGER NOT NULL DEFAULT 0');
+addColumnIfMissing('messages', 'last_reply_at', 'INTEGER');
+db.exec(`CREATE INDEX IF NOT EXISTS idx_messages_parent ON messages(parent_id);`);
 
 db.exec(`CREATE UNIQUE INDEX IF NOT EXISTS idx_scenarios_source_ref
          ON scenarios(source_ref) WHERE source_ref IS NOT NULL;`);

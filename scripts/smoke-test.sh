@@ -78,6 +78,7 @@ assert_status 200 "GET / (login page)" "${BASE}/"
 assert_status 200 "GET /admin"        "${BASE}/admin"
 assert_status 200 "GET /css/slack.css" "${BASE}/css/slack.css"
 assert_status 200 "GET /js/app.js"     "${BASE}/js/app.js"
+assert_status 200 "GET /js/emojis.js"  "${BASE}/js/emojis.js"
 assert_status 200 "GET /socket.io/socket.io.js" "${BASE}/socket.io/socket.io.js"
 
 echo "==> Auth required when no cookie"
@@ -118,6 +119,17 @@ echo "==> Channel messages"
 MSGS=$(curl -fsS -b "${COOKIE_JAR}" "${BASE}/api/channels/${GENERAL_ID}/messages?limit=10")
 node -e "const j=JSON.parse(process.argv[1]); if(!j.messages.some(m=>m.body==='Hello team!')) process.exit(1)" "${MSGS}"
 echo "  ok  GET /api/channels/:id/messages contains posted message"
+node -e "const j=JSON.parse(process.argv[1]); const m=j.messages.find(x=>x.body==='Hello team!'); if(!('replyCount' in m)||!('reactions' in m)) process.exit(1)" "${MSGS}"
+echo "  ok  message includes replyCount + reactions fields"
+
+MSG_ID=$(node -e "const j=JSON.parse(process.argv[1]); console.log(j.messages.find(x=>x.body==='Hello team!').id)" "${MSGS}")
+
+echo "==> Thread endpoint"
+THREAD=$(curl -fsS -b "${COOKIE_JAR}" "${BASE}/api/messages/${MSG_ID}/thread")
+node -e "const j=JSON.parse(process.argv[1]); if(j.root.id!==process.argv[2]||!Array.isArray(j.replies)) process.exit(1)" "${THREAD}" "${MSG_ID}"
+echo "  ok  GET /api/messages/:id/thread returns root + replies array"
+assert_status 404 "GET /api/messages/:id/thread for unknown id" \
+  -b "${COOKIE_JAR}" "${BASE}/api/messages/m_doesnotexist/thread"
 
 echo "==> Scenario CRUD + run"
 SC_DEF='{"personas":[{"username":"bot1","displayName":"Bot One","persona":"Be terse."}],"events":[{"delay_ms":0,"channel":"general","username":"bot1","body":"scenario hello"}]}'

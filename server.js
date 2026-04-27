@@ -123,24 +123,99 @@ function presenceList() {
 
 // ---------- core post helper (used by REST, sockets, scenarios) ----------
 
-async function postMessage({ channelId, userId, body }) {
+async function postMessage({ channelId, userId, body, parentId = null }) {
   const channel = db.prepare('SELECT * FROM channels WHERE id = ?').get(channelId);
   const user = db.prepare('SELECT * FROM users WHERE id = ?').get(userId);
   if (!channel || !user) throw new Error('channel_or_user_missing');
+
+  let parent = null;
+  if (parentId) {
+    parent = db.prepare('SELECT * FROM messages WHERE id = ? AND channel_id = ?').get(parentId, channelId);
+    if (!parent) throw new Error('parent_message_missing');
+    // If the "parent" is itself a reply, normalize to the thread root.
+    if (parent.parent_id) {
+      parent = db.prepare('SELECT * FROM messages WHERE id = ?').get(parent.parent_id);
+      if (!parent) throw new Error('thread_root_missing');
+      parentId = parent.id;
+    }
+  }
+
   const id = newId('m');
   const created = Date.now();
   db.prepare(
-    'INSERT INTO messages (id, channel_id, user_id, body, created_at) VALUES (?, ?, ?, ?, ?)'
-  ).run(id, channelId, userId, body, created);
+    'INSERT INTO messages (id, channel_id, user_id, body, parent_id, created_at) VALUES (?, ?, ?, ?, ?, ?)'
+  ).run(id, channelId, userId, body, parentId, created);
+
   const msg = {
     id,
     channelId,
     body,
+    parentId: parentId || null,
     createdAt: created,
     user: userPublic(user),
+    replyCount: 0,
+    lastReplyAt: null,
+    reactions: [],
   };
-  io.to(`channel:${channelId}`).emit('message', msg);
-  return { msg, channel, user };
+
+  if (parentId) {
+    // Update parent counters and emit thread events.
+    const updated = db
+      .prepare(
+        `UPDATE messages
+            SET reply_count = reply_count + 1,
+                last_reply_at = ?
+          WHERE id = ?`
+      )
+      .run(created, parentId);
+    if (updated.changes) {
+      const root = db.prepare('SELECT reply_count, last_reply_at FROM messages WHERE id = ?').get(parentId);
+      io.to(`thread:${parentId}`).emit('thread:reply', msg);
+      io.to(`channel:${channelId}`).emit('thread:update', {
+        messageId: parentId,
+        channelId,
+        replyCount: root.reply_count,
+        lastReplyAt: root.last_reply_at,
+      });
+    }
+  } else {
+    io.to(`channel:${channelId}`).emit('message', msg);
+  }
+
+  return { msg, channel, user, parent };
+}
+
+function reactionsForMessages(messageIds) {
+  if (!messageIds.length) return new Map();
+  const placeholders = messageIds.map(() => '?').join(',');
+  const rows = db
+    .prepare(
+      `SELECT message_id, emoji, user_id
+         FROM message_reactions
+        WHERE message_id IN (${placeholders})
+        ORDER BY created_at ASC`
+    )
+    .all(...messageIds);
+  const out = new Map();
+  for (const r of rows) {
+    if (!out.has(r.message_id)) out.set(r.message_id, []);
+    const list = out.get(r.message_id);
+    let entry = list.find((e) => e.emoji === r.emoji);
+    if (!entry) {
+      entry = { emoji: r.emoji, userIds: [] };
+      list.push(entry);
+    }
+    entry.userIds.push(r.user_id);
+  }
+  return out;
+}
+
+function attachReactions(messages) {
+  const reactions = reactionsForMessages(messages.map((m) => m.id));
+  for (const m of messages) {
+    m.reactions = reactions.get(m.id) || [];
+  }
+  return messages;
 }
 
 // ---------- REST API ----------
@@ -205,35 +280,14 @@ app.post('/api/channels', requireUser, (req, res) => {
   res.json({ channel: channelPublic(ch) });
 });
 
-app.get('/api/channels/:id/messages', requireUser, (req, res) => {
-  const limit = Math.min(parseInt(req.query.limit, 10) || 100, 500);
-  const before = req.query.before ? parseInt(req.query.before, 10) : null;
-  let rows;
-  if (before) {
-    rows = db
-      .prepare(
-        `SELECT m.id, m.channel_id, m.body, m.created_at,
-                u.id AS uid, u.username, u.display_name, u.avatar_color, u.is_bot, u.status_text
-         FROM messages m JOIN users u ON u.id = m.user_id
-         WHERE m.channel_id = ? AND m.created_at < ?
-         ORDER BY m.created_at DESC LIMIT ?`
-      )
-      .all(req.params.id, before, limit);
-  } else {
-    rows = db
-      .prepare(
-        `SELECT m.id, m.channel_id, m.body, m.created_at,
-                u.id AS uid, u.username, u.display_name, u.avatar_color, u.is_bot, u.status_text
-         FROM messages m JOIN users u ON u.id = m.user_id
-         WHERE m.channel_id = ?
-         ORDER BY m.created_at DESC LIMIT ?`
-      )
-      .all(req.params.id, limit);
-  }
-  const messages = rows.reverse().map((r) => ({
+function rowToMessage(r) {
+  return {
     id: r.id,
     channelId: r.channel_id,
     body: r.body,
+    parentId: r.parent_id || null,
+    replyCount: r.reply_count || 0,
+    lastReplyAt: r.last_reply_at || null,
     createdAt: r.created_at,
     user: {
       id: r.uid,
@@ -243,8 +297,60 @@ app.get('/api/channels/:id/messages', requireUser, (req, res) => {
       isBot: !!r.is_bot,
       statusText: r.status_text || '',
     },
-  }));
+  };
+}
+
+const MSG_SELECT = `m.id, m.channel_id, m.body, m.parent_id, m.reply_count, m.last_reply_at, m.created_at,
+                    u.id AS uid, u.username, u.display_name, u.avatar_color, u.is_bot, u.status_text`;
+
+app.get('/api/channels/:id/messages', requireUser, (req, res) => {
+  const limit = Math.min(parseInt(req.query.limit, 10) || 100, 500);
+  const before = req.query.before ? parseInt(req.query.before, 10) : null;
+  let rows;
+  if (before) {
+    rows = db
+      .prepare(
+        `SELECT ${MSG_SELECT}
+         FROM messages m JOIN users u ON u.id = m.user_id
+         WHERE m.channel_id = ? AND m.parent_id IS NULL AND m.created_at < ?
+         ORDER BY m.created_at DESC LIMIT ?`
+      )
+      .all(req.params.id, before, limit);
+  } else {
+    rows = db
+      .prepare(
+        `SELECT ${MSG_SELECT}
+         FROM messages m JOIN users u ON u.id = m.user_id
+         WHERE m.channel_id = ? AND m.parent_id IS NULL
+         ORDER BY m.created_at DESC LIMIT ?`
+      )
+      .all(req.params.id, limit);
+  }
+  const messages = attachReactions(rows.reverse().map(rowToMessage));
   res.json({ messages });
+});
+
+app.get('/api/messages/:id/thread', requireUser, (req, res) => {
+  const rootRow = db
+    .prepare(
+      `SELECT ${MSG_SELECT}
+       FROM messages m JOIN users u ON u.id = m.user_id
+       WHERE m.id = ? AND m.parent_id IS NULL`
+    )
+    .get(req.params.id);
+  if (!rootRow) return res.status(404).json({ error: 'not_found' });
+  const replyRows = db
+    .prepare(
+      `SELECT ${MSG_SELECT}
+       FROM messages m JOIN users u ON u.id = m.user_id
+       WHERE m.parent_id = ?
+       ORDER BY m.created_at ASC`
+    )
+    .all(req.params.id);
+  const root = rowToMessage(rootRow);
+  const replies = replyRows.map(rowToMessage);
+  attachReactions([root, ...replies]);
+  res.json({ root, replies });
 });
 
 app.get('/api/users', requireUser, (_req, res) => {
@@ -506,7 +612,7 @@ io.on('connection', (socket) => {
 
   socket.on('message:send', async (payload, ack) => {
     try {
-      const { channelId, body } = payload || {};
+      const { channelId, body, parentId } = payload || {};
       if (!channelId || !body || !body.trim()) {
         if (typeof ack === 'function') ack({ ok: false, error: 'invalid' });
         return;
@@ -517,13 +623,62 @@ io.on('connection', (socket) => {
         return;
       }
       ensureMembership(ch.id, user.id);
-      const { msg } = await postMessage({ channelId: ch.id, userId: user.id, body: body.trim() });
+      const { msg } = await postMessage({
+        channelId: ch.id,
+        userId: user.id,
+        body: body.trim(),
+        parentId: parentId || null,
+      });
       if (typeof ack === 'function') ack({ ok: true, message: msg });
 
-      // Trigger AI personas
-      maybeTriggerBots({ channel: ch, triggerMessage: { author: user.display_name, body: body.trim() } });
+      // Trigger AI personas only on top-level messages (not thread replies).
+      if (!parentId) {
+        maybeTriggerBots({ channel: ch, triggerMessage: { author: user.display_name, body: body.trim() } });
+      }
     } catch (err) {
       console.error('message:send error', err);
+      if (typeof ack === 'function') ack({ ok: false, error: err.message });
+    }
+  });
+
+  socket.on('thread:join', ({ messageId }) => {
+    if (messageId) socket.join(`thread:${messageId}`);
+  });
+  socket.on('thread:leave', ({ messageId }) => {
+    if (messageId) socket.leave(`thread:${messageId}`);
+  });
+
+  socket.on('reaction:toggle', async ({ messageId, emoji }, ack) => {
+    try {
+      if (!messageId || !emoji) {
+        if (typeof ack === 'function') ack({ ok: false, error: 'invalid' });
+        return;
+      }
+      const msg = db.prepare('SELECT id, channel_id, parent_id FROM messages WHERE id = ?').get(messageId);
+      if (!msg) {
+        if (typeof ack === 'function') ack({ ok: false, error: 'no_message' });
+        return;
+      }
+      const existing = db
+        .prepare('SELECT 1 FROM message_reactions WHERE message_id = ? AND user_id = ? AND emoji = ?')
+        .get(messageId, user.id, emoji);
+      if (existing) {
+        db.prepare('DELETE FROM message_reactions WHERE message_id = ? AND user_id = ? AND emoji = ?').run(
+          messageId, user.id, emoji
+        );
+      } else {
+        db.prepare(
+          'INSERT INTO message_reactions (message_id, user_id, emoji, created_at) VALUES (?, ?, ?, ?)'
+        ).run(messageId, user.id, emoji, Date.now());
+      }
+      const reactions = reactionsForMessages([messageId]).get(messageId) || [];
+      const payload = { messageId, channelId: msg.channel_id, parentId: msg.parent_id || null, reactions };
+      io.to(`channel:${msg.channel_id}`).emit('reaction:update', payload);
+      const threadRoot = msg.parent_id || msg.id;
+      io.to(`thread:${threadRoot}`).emit('reaction:update', payload);
+      if (typeof ack === 'function') ack({ ok: true, reactions });
+    } catch (err) {
+      console.error('reaction:toggle error', err);
       if (typeof ack === 'function') ack({ ok: false, error: err.message });
     }
   });
