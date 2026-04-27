@@ -1,0 +1,61 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Sign in</title>
+  <link rel="stylesheet" href="/css/slack.css" />
+</head>
+<body class="login-body">
+  <main class="login-card">
+    <div class="login-logo">
+      <span class="logo-square" style="background:#4A154B"></span>
+      <span class="logo-square" style="background:#36C5F0"></span>
+      <span class="logo-square" style="background:#2EB67D"></span>
+      <span class="logo-square" style="background:#ECB22E"></span>
+    </div>
+    <h1>Sign in to your workspace</h1>
+    <p class="muted">Enter a username to join the chat. New names create a new account.</p>
+    <form id="login-form">
+      <label>
+        <span>Username</span>
+        <input id="username" name="username" autocomplete="off" required pattern="[a-zA-Z0-9_.\-]{2,32}" placeholder="e.g. alex.hunter" />
+      </label>
+      <label>
+        <span>Display name (optional)</span>
+        <input id="displayName" name="displayName" autocomplete="off" placeholder="e.g. Alex Hunter" />
+      </label>
+      <button type="submit" class="primary">Sign In</button>
+      <p class="error" id="error"></p>
+    </form>
+    <div class="login-footer">
+      <a href="/admin">Facilitator console &rarr;</a>
+    </div>
+  </main>
+  <script>
+    document.getElementById('login-form').addEventListener('submit', async (e) => {
+      e.preventDefault();
+      const username = document.getElementById('username').value.trim();
+      const displayName = document.getElementById('displayName').value.trim();
+      const errBox = document.getElementById('error');
+      errBox.textContent = '';
+      try {
+        const res = await fetch('/api/auth/login', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ username, displayName }),
+          credentials: 'include',
+        });
+        const data = await res.json();
+        if (!res.ok) {
+          errBox.textContent = data.error || 'Login failed';
+          return;
+        }
+        window.location.href = '/';
+      } catch (err) {
+        errBox.textContent = err.message;
+      }
+    });
+  </script>
+</body>
+</html>

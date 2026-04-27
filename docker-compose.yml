@@ -1,0 +1,22 @@
+services:
+  chat:
+    build: .
+    image: ctf-slack-clone:latest
+    ports:
+      - "3000:3000"
+    environment:
+      # Required for AI persona auto-replies. Leave unset to keep bots silent
+      # unless driven by scenarios or the facilitator console.
+      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY:-}
+      # Token for /admin facilitator console. CHANGE THIS for any real event.
+      - ADMIN_TOKEN=${ADMIN_TOKEN:-changeme-admin}
+      # Default workspace name shown to users.
+      - DEFAULT_WORKSPACE_NAME=${DEFAULT_WORKSPACE_NAME:-CTF Workspace}
+      # Model for persona replies (defaults to Haiku 4.5).
+      - PERSONA_MODEL=${PERSONA_MODEL:-claude-haiku-4-5-20251001}
+    volumes:
+      - chat-data:/data
+    restart: unless-stopped
+
+volumes:
+  chat-data:

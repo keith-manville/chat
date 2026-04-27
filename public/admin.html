@@ -1,0 +1,94 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Facilitator console</title>
+  <link rel="stylesheet" href="/css/slack.css" />
+</head>
+<body class="admin">
+  <div class="admin-shell">
+    <h1>Facilitator console</h1>
+    <p class="muted">Manage AI personas, inject messages, and run tabletop scenarios.</p>
+
+    <div id="login-block" class="admin-panel active" style="max-width:420px;">
+      <h2>Sign in</h2>
+      <label>Admin token <input id="admin-token" type="password" /></label>
+      <button id="admin-login" style="margin-top:10px;background:#007a5a;color:#fff;border:none;border-radius:4px;padding:8px 12px;font-weight:700;">Sign in</button>
+      <p class="error" id="admin-login-err"></p>
+    </div>
+
+    <div id="console-block" hidden>
+      <nav class="tabs">
+        <button data-tab="personas" class="active">Personas</button>
+        <button data-tab="inject">Inject message</button>
+        <button data-tab="scenarios">Scenarios</button>
+      </nav>
+
+      <section class="admin-panel active" data-panel="personas">
+        <h2>AI personas</h2>
+        <div class="admin-grid">
+          <div class="admin-card">
+            <h3>Create / update persona</h3>
+            <label>Username</label>
+            <input id="p-username" placeholder="ceo" />
+            <label>Display name</label>
+            <input id="p-display" placeholder="Pat Morgan (CEO)" />
+            <label>Persona / system prompt</label>
+            <textarea id="p-persona" placeholder="You are Pat Morgan, CEO of Acme Corp..."></textarea>
+            <button id="p-save">Save persona</button>
+            <p class="muted" style="margin-top:8px;font-size:12px;">Personas auto-respond when @mentioned (or randomly chime in) if ANTHROPIC_API_KEY is set.</p>
+          </div>
+          <div class="admin-card">
+            <h3>Existing personas</h3>
+            <ul id="p-list" class="admin-list"></ul>
+          </div>
+        </div>
+      </section>
+
+      <section class="admin-panel" data-panel="inject">
+        <h2>Inject a message</h2>
+        <p class="muted">Post as any user (real or persona) into any channel. Useful for puppeteering personas live.</p>
+        <div class="admin-card" style="max-width:560px;">
+          <label>Channel name</label>
+          <input id="i-channel" placeholder="general" />
+          <label>Username</label>
+          <input id="i-username" placeholder="ceo" />
+          <label>Message</label>
+          <textarea id="i-body" placeholder="Type the message body..."></textarea>
+          <button id="i-send">Send message</button>
+          <p class="muted" id="i-status" style="margin-top:8px;font-size:12px;"></p>
+        </div>
+      </section>
+
+      <section class="admin-panel" data-panel="scenarios">
+        <h2>Scenarios</h2>
+        <div class="admin-grid">
+          <div class="admin-card">
+            <h3>New / edit scenario</h3>
+            <label>Name</label>
+            <input id="s-name" placeholder="Phishing incident — Hour 1" />
+            <label>Description</label>
+            <input id="s-desc" placeholder="Initial detection through containment" />
+            <label>Definition (JSON)</label>
+            <textarea id="s-def" spellcheck="false"></textarea>
+            <div style="display:flex;gap:8px;">
+              <button id="s-save">Save scenario</button>
+              <button id="s-load-example" class="ghost">Load example</button>
+            </div>
+            <p class="error" id="s-error"></p>
+          </div>
+          <div class="admin-card">
+            <h3>Saved scenarios</h3>
+            <ul id="s-list" class="admin-list"></ul>
+            <h3 style="margin-top:18px;">Run log</h3>
+            <div class="run-log" id="s-log">No runs yet.</div>
+          </div>
+        </div>
+      </section>
+    </div>
+  </div>
+
+  <script src="/js/admin.js"></script>
+</body>
+</html>

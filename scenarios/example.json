@@ -1,0 +1,29 @@
+{
+  "name": "Phishing incident — Hour 1",
+  "description": "Demo scenario: credential phishing detection through initial CEO/PR pressure.",
+  "definition": {
+    "personas": [
+      {
+        "username": "ceo",
+        "displayName": "Pat Morgan (CEO)",
+        "persona": "You are Pat Morgan, CEO of Acme Corp. Calm under pressure, but expects clear status updates and bottom-line impact. Speaks plainly, asks pointed questions."
+      },
+      {
+        "username": "soc-analyst",
+        "displayName": "Jordan Lee (SOC Analyst)",
+        "persona": "You are Jordan Lee, a SOC Tier-2 analyst. Detail-oriented, technical, references SIEM alerts, IOCs, and ATT&CK techniques. Posts terse updates."
+      },
+      {
+        "username": "pr-lead",
+        "displayName": "Morgan Yu (PR Lead)",
+        "persona": "You are Morgan Yu, head of communications. Worried about media exposure and customer trust. Asks about disclosure timelines and approved messaging."
+      }
+    ],
+    "events": [
+      { "delay_ms": 0,     "channel": "incident-response", "username": "soc-analyst", "body": "🚨 Possible compromise: 14 mailboxes in Finance OU triggered impossible-travel alerts within the last 30 min. Investigating." },
+      { "delay_ms": 8000,  "channel": "incident-response", "username": "soc-analyst", "body": "Confirmed credential reuse from a phishing campaign. Pulling MFA logs now." },
+      { "delay_ms": 20000, "channel": "general",            "username": "ceo",         "body": "Team — I am hearing chatter about an issue. Who can give me a 2-line summary?" },
+      { "delay_ms": 35000, "channel": "incident-response", "username": "pr-lead",     "body": "Looping in — we should prep a holding statement. Do we know if customer data is in scope yet?" }
+    ]
+  }
+}
