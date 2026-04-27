@@ -1,0 +1,52 @@
+name: Stop preview
+
+# Cancels any in-progress / queued runs of the "Launch preview" workflow,
+# which terminates the runner and tears down the Cloudflare tunnel.
+
+on:
+  workflow_dispatch:
+
+permissions:
+  actions: write
+  contents: read
+
+jobs:
+  stop:
+    name: Cancel running previews
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Cancel in-progress launch-preview runs
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          STATUSES=("in_progress" "queued" "waiting")
+          CANCELLED=0
+          for s in "${STATUSES[@]}"; do
+            IDS=$(gh run list \
+              --workflow=launch-preview.yml \
+              --status="$s" \
+              --limit 50 \
+              --json databaseId \
+              --jq '.[].databaseId' || true)
+            for id in $IDS; do
+              echo "Cancelling run ${id} (status=${s})"
+              gh run cancel "$id" || true
+              CANCELLED=$((CANCELLED + 1))
+            done
+          done
+
+          if [ "$CANCELLED" -eq 0 ]; then
+            echo "No in-progress launch-preview runs found."
+            echo "## Stop preview" >> "$GITHUB_STEP_SUMMARY"
+            echo "" >> "$GITHUB_STEP_SUMMARY"
+            echo "No active preview runs were found." >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "## Stop preview" >> "$GITHUB_STEP_SUMMARY"
+            echo "" >> "$GITHUB_STEP_SUMMARY"
+            echo "Cancelled ${CANCELLED} preview run(s)." >> "$GITHUB_STEP_SUMMARY"
+          fi

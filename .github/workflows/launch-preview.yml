@@ -1,0 +1,178 @@
+name: Launch preview
+
+# Manually-triggered preview environment.
+#
+# Boots the chat server inside the runner and exposes it through a Cloudflare
+# "quick tunnel" (no signup, no token, ephemeral *.trycloudflare.com URL).
+#
+# Tear down by either:
+#   1. Clicking "Cancel workflow" on the running job, OR
+#   2. Running the "Stop preview" workflow.
+# The job also auto-stops after `duration_minutes` as a safety net.
+
+on:
+  workflow_dispatch:
+    inputs:
+      duration_minutes:
+        description: "Auto-shutdown after this many minutes (max 350)."
+        required: true
+        default: "60"
+      anthropic_api_key:
+        description: "Optional: paste an Anthropic API key to enable AI persona auto-replies."
+        required: false
+        default: ""
+
+concurrency:
+  group: launch-preview
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  preview:
+    name: Preview tunnel
+    runs-on: ubuntu-latest
+    # 350 min input + a small buffer; hosted runner hard cap is 360.
+    timeout-minutes: 355
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Install cloudflared
+        run: |
+          curl -fsSL --output /tmp/cloudflared.deb \
+            https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64.deb
+          sudo dpkg -i /tmp/cloudflared.deb
+          cloudflared --version
+
+      - name: Generate admin token
+        id: token
+        run: |
+          TOKEN="$(openssl rand -hex 16)"
+          echo "::add-mask::${TOKEN}"
+          echo "admin_token=${TOKEN}" >> "$GITHUB_OUTPUT"
+
+      - name: Start chat server
+        env:
+          PORT: "3000"
+          ADMIN_TOKEN: ${{ steps.token.outputs.admin_token }}
+          ANTHROPIC_API_KEY: ${{ inputs.anthropic_api_key }}
+        run: |
+          mkdir -p /tmp/preview-data
+          DATA_DIR=/tmp/preview-data nohup node server.js > /tmp/server.log 2>&1 &
+          echo $! > /tmp/server.pid
+          for i in $(seq 1 40); do
+            if curl -fsS http://127.0.0.1:3000/api/health >/dev/null; then
+              echo "server up"
+              break
+            fi
+            sleep 0.5
+          done
+          curl -fsS http://127.0.0.1:3000/api/health
+
+      - name: Start Cloudflare tunnel
+        id: tunnel
+        run: |
+          nohup cloudflared tunnel --no-autoupdate --url http://localhost:3000 \
+            > /tmp/cf.log 2>&1 &
+          echo $! > /tmp/cf.pid
+
+          URL=""
+          for i in $(seq 1 60); do
+            URL="$(grep -oE 'https://[a-z0-9-]+\.trycloudflare\.com' /tmp/cf.log | head -1 || true)"
+            if [ -n "$URL" ]; then break; fi
+            sleep 1
+          done
+
+          if [ -z "$URL" ]; then
+            echo "Failed to obtain tunnel URL. Cloudflared log:" >&2
+            cat /tmp/cf.log >&2
+            exit 1
+          fi
+
+          echo "url=${URL}" >> "$GITHUB_OUTPUT"
+          echo "Tunnel URL: ${URL}"
+
+      - name: Publish URL to job summary
+        env:
+          URL: ${{ steps.tunnel.outputs.url }}
+          TOKEN: ${{ steps.token.outputs.admin_token }}
+          DURATION: ${{ inputs.duration_minutes }}
+        run: |
+          {
+            echo "## Preview is live"
+            echo ""
+            echo "| | |"
+            echo "|---|---|"
+            echo "| Chat UI    | <${URL}>          |"
+            echo "| Admin / facilitator | <${URL}/admin> |"
+            echo "| Admin token | \`${TOKEN}\` |"
+            echo "| Auto-shutdown | in ${DURATION} minutes |"
+            echo ""
+            echo "### How to tear it down"
+            echo ""
+            echo "- **Click \"Cancel workflow\"** on this run, **or**"
+            echo "- Run the **\"Stop preview\"** workflow from the Actions tab."
+            echo ""
+            echo "The runner is ephemeral — all chat state is wiped when the job ends."
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Hold the preview open
+        env:
+          DURATION: ${{ inputs.duration_minutes }}
+        run: |
+          DUR=${DURATION:-60}
+          if ! [[ "$DUR" =~ ^[0-9]+$ ]]; then DUR=60; fi
+          if [ "$DUR" -gt 350 ]; then DUR=350; fi
+          END=$(( $(date +%s) + DUR * 60 ))
+
+          SERVER_PID=$(cat /tmp/server.pid)
+          CF_PID=$(cat /tmp/cf.pid)
+
+          echo "Holding preview for ${DUR} minutes (PID server=${SERVER_PID} cloudflared=${CF_PID})."
+          while [ "$(date +%s)" -lt "$END" ]; do
+            if ! kill -0 "$SERVER_PID" 2>/dev/null; then
+              echo "Chat server exited. Tail of /tmp/server.log:" >&2
+              tail -n 50 /tmp/server.log >&2 || true
+              exit 1
+            fi
+            if ! kill -0 "$CF_PID" 2>/dev/null; then
+              echo "cloudflared exited. Tail of /tmp/cf.log:" >&2
+              tail -n 50 /tmp/cf.log >&2 || true
+              exit 1
+            fi
+            sleep 30
+          done
+          echo "Reached duration limit; shutting down."
+
+      - name: Stop background processes
+        if: always()
+        run: |
+          for f in /tmp/server.pid /tmp/cf.pid; do
+            if [ -f "$f" ]; then
+              PID=$(cat "$f" || true)
+              if [ -n "$PID" ] && kill -0 "$PID" 2>/dev/null; then
+                kill "$PID" || true
+              fi
+            fi
+          done
+
+      - name: Upload logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: preview-logs
+          path: |
+            /tmp/server.log
+            /tmp/cf.log
+          if-no-files-found: ignore
