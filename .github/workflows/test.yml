@@ -1,0 +1,97 @@
+name: Test
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  smoke:
+    name: REST + Socket.io smoke test
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Syntax check entrypoints
+        run: |
+          node --check server.js
+          node --check db.js
+          node --check lib/personas.js
+          node --check lib/scenarios.js
+          node --check lib/util.js
+          node --check public/js/app.js
+          node --check public/js/admin.js
+
+      - name: Validate example scenario JSON
+        run: node -e "JSON.parse(require('fs').readFileSync('scenarios/example.json','utf8'))"
+
+      - name: Run smoke test
+        run: ./scripts/smoke-test.sh
+        env:
+          PORT: "3199"
+          ADMIN_TOKEN: ci-test-token
+
+      - name: Upload server log on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: server-log
+          path: /tmp/server.log
+          if-no-files-found: ignore
+
+  docker:
+    name: Docker image build
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: false
+          load: true
+          tags: ctf-slack-clone:ci
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Boot container and hit /api/health
+        run: |
+          docker run -d --name chat -p 3000:3000 \
+            -e ADMIN_TOKEN=ci-test-token \
+            ctf-slack-clone:ci
+          for i in $(seq 1 40); do
+            if curl -fsS http://127.0.0.1:3000/api/health >/dev/null; then
+              echo "container healthy after ${i} attempts"
+              exit 0
+            fi
+            sleep 0.5
+          done
+          echo "container failed to become healthy"
+          docker logs chat
+          exit 1
+
+      - name: Container logs
+        if: always()
+        run: docker logs chat || true
+
+      - name: Stop container
+        if: always()
+        run: docker rm -f chat || true
