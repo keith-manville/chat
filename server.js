@@ -467,7 +467,9 @@ app.get('/api/admin/state', requireAdmin, (_req, res) => {
       path: SCENARIO_REPO_PATH_DEFAULT,
       hasEnvToken: !!SCENARIO_REPO_TOKEN_DEFAULT,
     },
-    aiEnabled: !!personas.getAnthropic(),
+    aiEnabled: personas.isAiEnabled(),
+    aiProvider: personas.getProvider(),
+    aiModel: personas.getModel(),
   });
 });
 
@@ -700,7 +702,7 @@ const recentBotPosts = new Map(); // `${botId}:${channelId}` -> last timestamp
 const BOT_COOLDOWN_MS = 8000;
 
 async function maybeTriggerBots({ channel, triggerMessage }) {
-  if (!personas.getAnthropic()) return; // no LLM key, bots stay silent unless driven by scenarios/admin
+  if (!personas.isAiEnabled()) return; // no LLM key, bots stay silent unless driven by scenarios/admin
   const bots = personas.listBots(defaultWorkspaceId);
   if (!bots.length) return;
 
@@ -759,7 +761,11 @@ const PORT = parseInt(process.env.PORT, 10) || 3000;
 server.listen(PORT, () => {
   console.log(`Slack-clone listening on :${PORT}`);
   console.log(`Workspace: ${defaultWorkspaceId}`);
-  if (!personas.getAnthropic()) {
-    console.log('[personas] ANTHROPIC_API_KEY not set — AI bots will be silent unless driven by admin/scenarios.');
+  if (!personas.isAiEnabled()) {
+    console.log(
+      '[personas] No ANTHROPIC_API_KEY or GEMINI_API_KEY set — AI bots will be silent unless driven by admin/scenarios.'
+    );
+  } else {
+    console.log(`[personas] AI provider: ${personas.getProvider()} (model: ${personas.getModel()})`);
   }
 });

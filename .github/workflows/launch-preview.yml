@@ -18,7 +18,15 @@ on:
         required: true
         default: "60"
       anthropic_api_key:
-        description: "Optional: paste an Anthropic API key to enable AI persona auto-replies."
+        description: "Optional: Anthropic API key for AI persona auto-replies (Claude)."
+        required: false
+        default: ""
+      gemini_api_key:
+        description: "Optional: Google Gemini API key for AI persona auto-replies."
+        required: false
+        default: ""
+      llm_provider:
+        description: "Optional override when both keys are set: anthropic | gemini."
         required: false
         default: ""
       admin_token:
@@ -81,6 +89,8 @@ jobs:
           PORT: "3000"
           ADMIN_TOKEN: ${{ steps.token.outputs.admin_token }}
           ANTHROPIC_API_KEY: ${{ inputs.anthropic_api_key }}
+          GEMINI_API_KEY: ${{ inputs.gemini_api_key }}
+          LLM_PROVIDER: ${{ inputs.llm_provider }}
         run: |
           mkdir -p /tmp/preview-data
           DATA_DIR=/tmp/preview-data nohup node server.js > /tmp/server.log 2>&1 &

@@ -5,15 +5,21 @@ services:
     ports:
       - "3000:3000"
     environment:
-      # Required for AI persona auto-replies. Leave unset to keep bots silent
-      # unless driven by scenarios or the facilitator console.
+      # AI provider keys for persona auto-replies. Set ONE (or both — see
+      # LLM_PROVIDER below). Leave unset to keep bots silent unless driven
+      # by scenarios or the facilitator console.
       - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY:-}
+      - GEMINI_API_KEY=${GEMINI_API_KEY:-}
+      # Optional override when both keys are set: anthropic | gemini
+      - LLM_PROVIDER=${LLM_PROVIDER:-}
       # Token for /admin facilitator console. CHANGE THIS for any real event.
       - ADMIN_TOKEN=${ADMIN_TOKEN:-changeme-admin}
       # Default workspace name shown to users.
       - DEFAULT_WORKSPACE_NAME=${DEFAULT_WORKSPACE_NAME:-CTF Workspace}
-      # Model for persona replies (defaults to Haiku 4.5).
-      - PERSONA_MODEL=${PERSONA_MODEL:-claude-haiku-4-5-20251001}
+      # Model for persona replies. Default depends on provider:
+      # - anthropic → claude-haiku-4-5-20251001
+      # - gemini    → gemini-2.5-flash
+      - PERSONA_MODEL=${PERSONA_MODEL:-}
       # Optional defaults for the GitHub scenarios sync form. PAT can also be
       # entered in the UI (and is then session-only, never written to disk).
       - SCENARIO_REPO=${SCENARIO_REPO:-}

@@ -27,9 +27,14 @@ using AI-generated personas and pre-scripted message timelines.
 ## Quick start (Docker)
 
 ```bash
-# 1. build & run
+# 1. build & run (pick ONE LLM provider, or skip both for a silent demo)
 ADMIN_TOKEN=pickAStrongValue \
 ANTHROPIC_API_KEY=sk-ant-...   \
+docker compose up --build
+
+# ...or use Gemini instead:
+ADMIN_TOKEN=pickAStrongValue \
+GEMINI_API_KEY=AIza... \
 docker compose up --build
 ```
 
@@ -38,14 +43,18 @@ Then:
 - Open <http://localhost:3000/> — pick a username to sign in.
 - Open <http://localhost:3000/admin> — facilitator console (use `ADMIN_TOKEN`).
 
-`ANTHROPIC_API_KEY` is optional. If unset, AI personas stay silent unless the
-facilitator drives them via scenarios or the *Inject message* tab.
+The LLM key is optional. If neither `ANTHROPIC_API_KEY` nor `GEMINI_API_KEY`
+is set, AI personas stay silent unless the facilitator drives them via
+scenarios or the *Inject message* tab. If both are set, Anthropic is used by
+default; set `LLM_PROVIDER=gemini` to switch.
 
 ## Running without Docker
 
 ```bash
 npm install
 ADMIN_TOKEN=pickAStrongValue ANTHROPIC_API_KEY=sk-ant-... npm start
+# or, with Gemini:
+# ADMIN_TOKEN=pickAStrongValue GEMINI_API_KEY=AIza... npm start
 ```
 
 State is persisted under `./data/chat.db` (or `$DATA_DIR`).
@@ -57,8 +66,10 @@ State is persisted under `./data/chat.db` (or `$DATA_DIR`).
 | `PORT` | `3000` | HTTP port |
 | `DATA_DIR` | `./data` (or `/data` in Docker) | SQLite + WAL files |
 | `ADMIN_TOKEN` | `changeme-admin` | Required to access `/admin` |
-| `ANTHROPIC_API_KEY` | *(unset)* | Enables AI persona auto-replies |
-| `PERSONA_MODEL` | `claude-haiku-4-5-20251001` | Model used for persona replies |
+| `ANTHROPIC_API_KEY` | *(unset)* | Enables AI persona auto-replies via Claude |
+| `GEMINI_API_KEY` | *(unset)* | Enables AI persona auto-replies via Google Gemini |
+| `LLM_PROVIDER` | *(auto)* | `anthropic` or `gemini`. Used only when both keys are set; otherwise auto-detected |
+| `PERSONA_MODEL` | provider default | Override the model. Anthropic default: `claude-haiku-4-5-20251001`. Gemini default: `gemini-2.5-flash` |
 | `DEFAULT_WORKSPACE_NAME` | `CTF Workspace` | Sidebar title |
 | `SCENARIO_REPO` | *(unset)* | Default `owner/name` for the GitHub-sync form |
 | `SCENARIO_REPO_REF` | `main` | Default branch / tag / sha |
