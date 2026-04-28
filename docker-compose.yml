@@ -26,14 +26,14 @@ services:
       - SCENARIO_REPO_REF=${SCENARIO_REPO_REF:-main}
       - SCENARIO_REPO_PATH=${SCENARIO_REPO_PATH:-scenarios}
       - SCENARIO_REPO_TOKEN=${SCENARIO_REPO_TOKEN:-}
-      # Instruqt integration. Set INSTRUQT_MODE=true in tracks; INSTRUQT_INVITE_ID
-      # is bound to the cohort's join_code, so each Instruqt invite maps 1:1 to
-      # a cohort. INSTRUQT_HOST_MODE=true also creates an admin sandbox cohort.
-      - INSTRUQT_MODE=${INSTRUQT_MODE:-}
-      - INSTRUQT_INVITE_ID=${INSTRUQT_INVITE_ID:-}
-      - INSTRUQT_SCENARIO_ID=${INSTRUQT_SCENARIO_ID:-}
-      - INSTRUQT_COHORT_NAME=${INSTRUQT_COHORT_NAME:-}
-      - INSTRUQT_HOST_MODE=${INSTRUQT_HOST_MODE:-}
+      # Single-event mode (one Cloud Run service per event). Setting these
+      # binds this container to one cohort, opens the /register page, and
+      # enables auto sign-in via /?u=<id>&n=<displayName>.
+      - AUTO_SIGNIN_MODE=${AUTO_SIGNIN_MODE:-}
+      - EVENT_INVITE_ID=${EVENT_INVITE_ID:-}
+      - EVENT_SCENARIO_ID=${EVENT_SCENARIO_ID:-}
+      - EVENT_COHORT_NAME=${EVENT_COHORT_NAME:-}
+      - EVENT_ADMIN_MODE=${EVENT_ADMIN_MODE:-}
     volumes:
       - chat-data:/data
     restart: unless-stopped

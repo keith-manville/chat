@@ -380,6 +380,79 @@ app.post('/api/dms', requireUser, (req, res) => {
   res.json({ channel: channelPublic(ch), peer: userPublic(other) });
 });
 
+// ---------- Registration (event landing page) ----------
+//
+// Public endpoint used by the external (Apps-Script-built / Okta-driven)
+// registration page. Same flow also serves the in-app /register page so we
+// can dogfood the loop locally. Behavior:
+//
+//   - Only available when AUTO_SIGNIN_MODE=true and an EVENT_INVITE_ID is bound.
+//   - Caller posts { email, displayName }.
+//   - We derive a stable username from the email's local part, find or create
+//     the user, join them to the event cohort, set the session cookie, and
+//     respond with { redirectTo: '/' }.
+
+function deriveUsernameFromEmail(email) {
+  const local = String(email || '').split('@', 1)[0];
+  return local
+    .toLowerCase()
+    .replace(/[^a-z0-9_.-]/g, '')
+    .slice(0, 32);
+}
+
+app.get('/api/event', (_req, res) => {
+  res.json({
+    autoSigninMode: AUTO_SIGNIN_MODE,
+    cohort: eventCohort
+      ? { id: eventCohort.id, name: eventCohort.name }
+      : null,
+    adminCohortAvailable: !!adminCohort,
+  });
+});
+
+app.post('/api/register', async (req, res) => {
+  if (!AUTO_SIGNIN_MODE) return res.status(404).json({ error: 'registration_disabled' });
+  if (!eventCohort) return res.status(503).json({ error: 'cohort_not_ready' });
+  const { email, displayName, asAdmin } = req.body || {};
+  if (!email || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
+    return res.status(400).json({ error: 'invalid_email' });
+  }
+  const username = deriveUsernameFromEmail(email);
+  if (!/^[a-zA-Z0-9_.-]{2,32}$/.test(username)) {
+    return res.status(400).json({ error: 'invalid_email_local_part' });
+  }
+  const wantAdmin = !!asAdmin && !!adminCohort;
+  let user = db
+    .prepare('SELECT * FROM users WHERE workspace_id = ? AND username = ?')
+    .get(defaultWorkspaceId, username);
+  if (!user) {
+    const id = newId('u');
+    db.prepare(
+      'INSERT INTO users (id, workspace_id, username, display_name, avatar_color, is_bot, created_at) VALUES (?, ?, ?, ?, ?, 0, ?)'
+    ).run(
+      id,
+      defaultWorkspaceId,
+      username,
+      displayName || username,
+      pickAvatarColor(username),
+      Date.now()
+    );
+    user = db.prepare('SELECT * FROM users WHERE id = ?').get(id);
+  } else if (displayName && user.display_name !== displayName) {
+    db.prepare('UPDATE users SET display_name = ? WHERE id = ?').run(displayName, user.id);
+  }
+  const targetCohort = wantAdmin ? adminCohort : eventCohort;
+  try {
+    const result = cohortsLib.joinCohort({ code: targetCohort.joinCode, userId: user.id });
+    populateInstructionsIfEmpty(targetCohort);
+    if (result.isNewRun) await fireStartTasksForRun(result.run);
+  } catch (err) {
+    return res.status(400).json({ error: err.message });
+  }
+  res.cookie('sid', user.id, { httpOnly: true, sameSite: 'lax' });
+  res.json({ ok: true, redirectTo: '/' });
+});
+
 // ---------- Cohort join ----------
 
 app.post('/api/cohorts/join', requireUser, async (req, res) => {
@@ -1062,13 +1135,12 @@ async function maybeTriggerBots({ channel, triggerMessage }) {
 // ---------- HTML routes ----------
 
 app.get('/', async (req, res) => {
-  if (await tryInstruqtAutoSignIn(req, res)) return;
+  if (await tryAutoSignIn(req, res)) return;
   const user = getUserBySession(req);
   if (!user) {
-    if (INSTRUQT_MODE) {
-      return res.status(400).send(
-        'Instruqt mode is enabled. Open this app via your Instruqt sandbox URL, which must include ?u=<username>.'
-      );
+    if (AUTO_SIGNIN_MODE) {
+      // No bare login form in auto-signin mode; send people through /register.
+      return res.redirect('/register');
     }
     return res.sendFile(path.join(__dirname, 'public', 'login.html'));
   }
@@ -1078,7 +1150,7 @@ app.get('/', async (req, res) => {
 });
 
 app.get('/join', async (req, res) => {
-  if (await tryInstruqtAutoSignIn(req, res)) return;
+  if (await tryAutoSignIn(req, res)) return;
   const user = getUserBySession(req);
   if (!user) return res.sendFile(path.join(__dirname, 'public', 'login.html'));
   res.sendFile(path.join(__dirname, 'public', 'join.html'));
@@ -1088,59 +1160,63 @@ app.get('/scoreboard', (_req, res) => {
   res.sendFile(path.join(__dirname, 'public', 'scoreboard.html'));
 });
 
+app.get('/register', (_req, res) => {
+  res.sendFile(path.join(__dirname, 'public', 'register.html'));
+});
+
 app.get('/admin', (_req, res) => {
   res.sendFile(path.join(__dirname, 'public', 'admin.html'));
 });
 
-// ---------- Instruqt bootstrap ----------
+// ---------- Event bootstrap ----------
 //
-// Container env contract:
-//   INSTRUQT_MODE            - 'true' to enable auto-login + bootstrap
-//   INSTRUQT_INVITE_ID       - used as the cohort join_code (the participant cohort)
-//   INSTRUQT_SCENARIO_ID     - which scenario the cohort runs
-//   INSTRUQT_COHORT_NAME     - display name (optional)
-//   INSTRUQT_HOST_MODE       - 'true' to also create an admin/sandbox cohort
+// Container env contract (one event = one Cloud Run service):
+//   AUTO_SIGNIN_MODE   - 'true' to enable auto-login + bootstrap
+//   EVENT_INVITE_ID    - used as the cohort join_code (the participant cohort)
+//   EVENT_SCENARIO_ID  - which scenario the cohort runs
+//   EVENT_COHORT_NAME  - display name (optional)
+//   EVENT_ADMIN_MODE   - 'true' to also create an admin/sandbox cohort
 
-const INSTRUQT_MODE = String(process.env.INSTRUQT_MODE || '').toLowerCase() === 'true';
-const INSTRUQT_INVITE_ID = process.env.INSTRUQT_INVITE_ID || '';
-const INSTRUQT_SCENARIO_ID = process.env.INSTRUQT_SCENARIO_ID || '';
-const INSTRUQT_COHORT_NAME = process.env.INSTRUQT_COHORT_NAME || 'Instruqt cohort';
-const INSTRUQT_HOST_MODE = String(process.env.INSTRUQT_HOST_MODE || '').toLowerCase() === 'true';
+const AUTO_SIGNIN_MODE = String(process.env.AUTO_SIGNIN_MODE || '').toLowerCase() === 'true';
+const EVENT_INVITE_ID = process.env.EVENT_INVITE_ID || '';
+const EVENT_SCENARIO_ID = process.env.EVENT_SCENARIO_ID || '';
+const EVENT_COHORT_NAME = process.env.EVENT_COHORT_NAME || 'Event cohort';
+const EVENT_ADMIN_MODE = String(process.env.EVENT_ADMIN_MODE || '').toLowerCase() === 'true';
 
-let instruqtCohort = null;
+let eventCohort = null;
 let adminCohort = null;
 
-function bootstrapInstruqtCohorts() {
-  if (!INSTRUQT_MODE) return;
-  if (!INSTRUQT_INVITE_ID) {
-    console.warn('[instruqt] INSTRUQT_MODE=true but no INSTRUQT_INVITE_ID set; skipping bootstrap.');
+function bootstrapEventCohorts() {
+  if (!AUTO_SIGNIN_MODE) return;
+  if (!EVENT_INVITE_ID) {
+    console.warn('[event] AUTO_SIGNIN_MODE=true but no EVENT_INVITE_ID set; skipping bootstrap.');
     return;
   }
   try {
-    instruqtCohort = cohortsLib.ensureCohort({
-      joinCode: INSTRUQT_INVITE_ID,
-      scenarioId: INSTRUQT_SCENARIO_ID || undefined,
-      name: INSTRUQT_COHORT_NAME,
+    eventCohort = cohortsLib.ensureCohort({
+      joinCode: EVENT_INVITE_ID,
+      scenarioId: EVENT_SCENARIO_ID || undefined,
+      name: EVENT_COHORT_NAME,
     });
-    console.log(`[instruqt] participant cohort: ${instruqtCohort.name} (code ${instruqtCohort.joinCode})`);
-    if (INSTRUQT_HOST_MODE) {
-      const adminCode = (INSTRUQT_INVITE_ID + '-ADMIN').toUpperCase();
+    console.log(`[event] participant cohort: ${eventCohort.name} (code ${eventCohort.joinCode})`);
+    if (EVENT_ADMIN_MODE) {
+      const adminCode = (EVENT_INVITE_ID + '-ADMIN').toUpperCase();
       adminCohort = cohortsLib.ensureCohort({
         joinCode: adminCode,
-        scenarioId: INSTRUQT_SCENARIO_ID || undefined,
-        name: `${INSTRUQT_COHORT_NAME} — Admin sandbox`,
+        scenarioId: EVENT_SCENARIO_ID || undefined,
+        name: `${EVENT_COHORT_NAME} — Admin sandbox`,
       });
-      console.log(`[instruqt] admin sandbox cohort: ${adminCohort.name} (code ${adminCohort.joinCode})`);
+      console.log(`[event] admin sandbox cohort: ${adminCohort.name} (code ${adminCohort.joinCode})`);
     }
   } catch (err) {
-    console.error('[instruqt] bootstrap failed:', err.message);
+    console.error('[event] bootstrap failed:', err.message);
   }
 }
 
 // ---------- Auto sign-in helper (called from / and /join handlers) ----------
 
-async function tryInstruqtAutoSignIn(req, res) {
-  if (!INSTRUQT_MODE) return false;
+async function tryAutoSignIn(req, res) {
+  if (!AUTO_SIGNIN_MODE) return false;
   if (req.cookies && req.cookies.sid) return false;
   const u = (req.query.u || '').toString().trim();
   const n = (req.query.n || '').toString().trim();
@@ -1156,14 +1232,14 @@ async function tryInstruqtAutoSignIn(req, res) {
     ).run(id, defaultWorkspaceId, u, n || u, pickAvatarColor(u), Date.now());
     user = db.prepare('SELECT * FROM users WHERE id = ?').get(id);
   }
-  const targetCohort = wantAdmin ? adminCohort : instruqtCohort;
+  const targetCohort = wantAdmin ? adminCohort : eventCohort;
   if (targetCohort) {
     try {
       const result = cohortsLib.joinCohort({ code: targetCohort.joinCode, userId: user.id });
       populateInstructionsIfEmpty(targetCohort);
       if (result.isNewRun) await fireStartTasksForRun(result.run);
     } catch (err) {
-      console.warn('[instruqt] auto-join failed:', err.message);
+      console.warn('[event] auto-join failed:', err.message);
     }
   }
   res.cookie('sid', user.id, { httpOnly: true, sameSite: 'lax' });
@@ -1174,7 +1250,7 @@ async function tryInstruqtAutoSignIn(req, res) {
 // ---------- listen ----------
 
 const PORT = parseInt(process.env.PORT, 10) || 3000;
-bootstrapInstruqtCohorts();
+bootstrapEventCohorts();
 server.listen(PORT, () => {
   console.log(`Slack-clone listening on :${PORT}`);
   console.log(`Workspace: ${defaultWorkspaceId}`);
@@ -1185,8 +1261,9 @@ server.listen(PORT, () => {
   } else {
     console.log(`[personas] AI provider: ${personas.getProvider()} (model: ${personas.getModel()})`);
   }
-  if (INSTRUQT_MODE) {
-    console.log(`[instruqt] mode enabled. Participant URL: /?u=<id>&n=<displayName>`);
-    if (INSTRUQT_HOST_MODE) console.log(`[instruqt] host URL: /?u=<id>&n=<displayName>&admin=1`);
+  if (AUTO_SIGNIN_MODE) {
+    console.log(`[event] auto-signin mode enabled. Registration URL: /register`);
+    console.log(`[event] direct sign-in URL: /?u=<id>&n=<displayName>`);
+    if (EVENT_ADMIN_MODE) console.log(`[event] admin URL: /?u=<id>&n=<displayName>&admin=1`);
   }
 });

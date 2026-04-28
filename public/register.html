@@ -1,0 +1,91 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Register</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Lato:wght@400;700;900&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="/css/slack.css" />
+</head>
+<body class="login-body">
+  <main class="login-card">
+    <div class="login-logo">
+      <span class="logo-square" style="background:#4A154B"></span>
+      <span class="logo-square" style="background:#36C5F0"></span>
+      <span class="logo-square" style="background:#2EB67D"></span>
+      <span class="logo-square" style="background:#ECB22E"></span>
+    </div>
+    <h1 id="event-title">Register for the event</h1>
+    <p class="muted" id="event-subtitle">Loading...</p>
+    <form id="register-form" hidden>
+      <label>
+        <span>Work email</span>
+        <input id="email" name="email" type="email" autocomplete="email" required placeholder="alex@acme.com" />
+      </label>
+      <label>
+        <span>Display name</span>
+        <input id="displayName" name="displayName" autocomplete="name" required placeholder="Alex Hunter" />
+      </label>
+      <label id="admin-row" hidden style="display:flex;align-items:center;gap:8px;">
+        <input id="asAdmin" name="asAdmin" type="checkbox" style="width:auto;" />
+        <span style="font-weight:400;">Register into the admin sandbox cohort (host testing)</span>
+      </label>
+      <button type="submit" class="primary">Register and enter</button>
+      <p class="error" id="error"></p>
+    </form>
+    <div id="not-ready" class="error" hidden>
+      Registration is not enabled on this deployment. Open the regular sign-in page at <a href="/">/</a>.
+    </div>
+  </main>
+  <script>
+    (async function () {
+      try {
+        const res = await fetch('/api/event', { credentials: 'include' });
+        const data = await res.json();
+        if (!data.autoSigninMode || !data.cohort) {
+          document.getElementById('event-subtitle').textContent = '';
+          document.getElementById('not-ready').hidden = false;
+          return;
+        }
+        document.getElementById('event-title').textContent = `Register: ${data.cohort.name}`;
+        document.getElementById('event-subtitle').textContent =
+          'Provide your work email and display name to join the cohort.';
+        document.getElementById('register-form').hidden = false;
+        if (data.adminCohortAvailable) {
+          document.getElementById('admin-row').hidden = false;
+          document.getElementById('admin-row').style.display = 'flex';
+        }
+      } catch (err) {
+        document.getElementById('event-subtitle').textContent = 'Failed to load event info.';
+      }
+    })();
+
+    document.getElementById('register-form').addEventListener('submit', async (e) => {
+      e.preventDefault();
+      const email = document.getElementById('email').value.trim();
+      const displayName = document.getElementById('displayName').value.trim();
+      const asAdmin = document.getElementById('asAdmin').checked;
+      const errBox = document.getElementById('error');
+      errBox.textContent = '';
+      try {
+        const res = await fetch('/api/register', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ email, displayName, asAdmin }),
+          credentials: 'include',
+        });
+        const data = await res.json();
+        if (!res.ok) {
+          errBox.textContent = data.error || 'Registration failed';
+          return;
+        }
+        window.location.href = data.redirectTo || '/';
+      } catch (err) {
+        errBox.textContent = err.message;
+      }
+    });
+  </script>
+</body>
+</html>

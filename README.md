@@ -205,47 +205,84 @@ grader. Outside of that — between tasks, on noise tasks, or after a task's
 completed — the persona stays in character via the AI provider, grounded in
 the scenario's `briefing`.
 
-## Instruqt integration
+## Single-event deployment (Cloud Run, etc.)
 
-Bind one Instruqt invite to one cohort. Set in the container:
+The intended production shape is **one container per event**, parameterized
+at deploy time. Set these env vars when you `gcloud run deploy` a service:
 
 | Var | What it does |
 | --- | --- |
-| `INSTRUQT_MODE=true` | Enables auto sign-in via URL query params |
-| `INSTRUQT_INVITE_ID` | Used as the cohort's `join_code`; cohort is upserted on boot |
-| `INSTRUQT_SCENARIO_ID` | Which scenario the cohort runs |
-| `INSTRUQT_COHORT_NAME` | Display name shown in the sidebar / scoreboard |
-| `INSTRUQT_HOST_MODE=true` | Also creates a parallel `*-ADMIN` cohort for proctor dry-runs |
+| `AUTO_SIGNIN_MODE=true` | Enables `/register` and the `?u=…` auto sign-in URL |
+| `EVENT_INVITE_ID` | Used as the cohort's `join_code`; cohort is upserted on boot |
+| `EVENT_SCENARIO_ID` | Which scenario the cohort runs |
+| `EVENT_COHORT_NAME` | Display name shown in the sidebar / scoreboard |
+| `EVENT_ADMIN_MODE=true` | Also creates a parallel `*-ADMIN` cohort for proctor dry-runs |
 
-Participants land at:
+Once the container is up there are two ways into it:
+
+**1. The registration page** at `/register` (recommended for production)
+
+This page reads the bound cohort name from the server, asks for a work email
++ display name, derives a stable username from the email's local part, and
+joins the user. It also exposes a checkbox to register into the admin sandbox
+cohort when `EVENT_ADMIN_MODE=true`.
+
+The Apps-Script-built / Okta-driven external registration page can either:
+
+- Embed `/register` in an iframe, or
+- POST directly to `POST /api/register` with `{ email, displayName, asAdmin? }`
+  after Okta has provisioned the user, then redirect to `/`.
+
+**2. Direct sign-in URL** (used by the external registration page after Okta)
 
 ```
-/?u=<unique-username>&n=<URL-encoded-display-name>
+https://<event-url>/?u=<stable-username>&n=<URL-encoded-display-name>
+https://<event-url>/?u=<stable-username>&n=<URL-encoded-display-name>&admin=1
 ```
 
-Server creates the user if needed, joins them to the invite's cohort, fires
-all `trigger:"start"` tasks, redirects to `/`. Hosts/proctors testing the
-track land at:
+Server upserts the user, joins them to the right cohort, fires all
+`trigger:"start"` tasks, sets the session cookie, and redirects to `/`.
 
+In `AUTO_SIGNIN_MODE`, hitting `/` without a session and without `?u=` is
+redirected to `/register`. There's no manual login form for participants.
+
+### Cloud Run specifics
+
+- The default `Dockerfile` already reads `process.env.PORT` (Cloud Run sets
+  this) and listens on `0.0.0.0`.
+- The image is stateless except for `/data` (SQLite). Cloud Run has no
+  persistent disk for services; for testing this is fine if you run with
+  `--min-instances=1 --max-instances=1` so a single warm instance keeps
+  state for the event window. For anything you'd hate to lose mid-event,
+  swap to Cloud SQL (Postgres) — see "Multi-instance scaling" below.
+- For a custom domain, put a Cloud Load Balancer in front; otherwise the
+  default `https://<service>-<hash>.run.app` is fine.
+
+### Testing the flow locally
+
+```bash
+ADMIN_TOKEN=t \
+ANTHROPIC_API_KEY=sk-ant-... \
+AUTO_SIGNIN_MODE=true \
+EVENT_INVITE_ID=TEST-EVENT-1 \
+EVENT_COHORT_NAME="Local test" \
+EVENT_ADMIN_MODE=true \
+npm start
 ```
-/?u=<unique-username>&n=<URL-encoded-display-name>&admin=1
-```
 
-→ which routes them into the admin sandbox cohort. No login screen, no join
-code entry. The host's existing process just needs to mint the URL with each
-Instruqt participant's identity.
-
-In Instruqt mode, `/` without `?u=` returns 400 — there's no manual login
-fallback (since the integration is the auth boundary).
+Then create a scenario in `/admin`, copy its id, and re-deploy with
+`EVENT_SCENARIO_ID=<id>` so the cohort is bound to it on next boot. Or
+create the scenario before setting `AUTO_SIGNIN_MODE=true`. Open
+`/register` to drop a test participant in.
 
 ### Multi-instance / horizontal scaling
 
 Today the server is single-process: SQLite is a single-writer file and
-Socket.io rooms live in-memory. For multi-instance you'd swap to Postgres
-(schema is portable; all writes go through prepared statements) and add the
-`@socket.io/redis-adapter`. That's a separate refactor, not part of Swing 2.
-For an Instruqt-per-invite container, one process per cohort is the natural
-shape and works fine.
+Socket.io rooms live in-memory. The right shape for multi-instance is
+**Postgres** (schema is portable; all writes go through prepared statements)
+plus the **`@socket.io/redis-adapter`** so emits from any pod reach all
+sockets. For one container per event with `--max-instances=1`, the current
+SQLite-backed setup is fine.
 
 ## Load vs. Run vs. Unload
 
