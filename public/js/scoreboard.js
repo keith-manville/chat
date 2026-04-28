@@ -20,10 +20,21 @@ function initials(name) {
   return String(name || '?').split(/\s+/).slice(0, 2).map((s) => s[0]).join('').toUpperCase();
 }
 
+function progressCell(r) {
+  if (!r.tasksTotal) return '<small class="muted">—</small>';
+  const pct = Math.min(100, Math.round((r.tasksCompleted / r.tasksTotal) * 100));
+  return `
+    <div class="progress">
+      <div class="progress-bar"><div class="progress-fill" style="width:${pct}%"></div></div>
+      <small>${r.tasksCompleted} / ${r.tasksTotal}</small>
+    </div>
+  `;
+}
+
 function render(runs) {
   const tbody = document.getElementById('rows');
   if (!runs.length) {
-    tbody.innerHTML = '<tr><td colspan="5" class="muted">No participants yet.</td></tr>';
+    tbody.innerHTML = '<tr><td colspan="6" class="muted">No participants yet.</td></tr>';
   } else {
     tbody.innerHTML = runs
       .map((r) => `
@@ -36,6 +47,7 @@ function render(runs) {
             ${r.completed ? '<span class="pill" style="background:#2BAC76;color:#fff;">DONE</span>' : ''}
           </td>
           <td class="num"><strong>${r.score}</strong></td>
+          <td>${progressCell(r)}</td>
           <td class="num">${r.hintsUsed}</td>
           <td>${fmtRel(r.lastActivityAt)}</td>
         </tr>

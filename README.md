@@ -158,20 +158,94 @@ Tasks live alongside `personas` and `events` in the scenario `definition`:
   {
     "id": "t1-vector",
     "asks": "soc-analyst",
-    "trigger": "start",
-    "prompt": "Alert just fired on a phishing email. What ATT&CK technique was used? (sub-technique OK)",
+    "trigger": "start",                        // or "after:<task-id>"
+    "prompt": "What ATT&CK technique was used?",
     "answer": { "type": "regex", "pattern": "^T1566(\\.\\d+)?$", "case_insensitive": true },
     "points": 100,
     "first_blood_bonus": 25,
     "max_attempts": 5,
-    "on_correct": { "reply": "Nice. Move on to scoping.", "next": "t2-scope" },
+    "hints": [
+      { "after_attempts": 2, "cost": 10, "text": "Look at *Authentication-Results* in Chronicle." },
+      { "after_attempts": 4, "cost": 25, "text": "It's the parent technique for *Phishing*." }
+    ],
+    "on_correct": { "reply": "Nice. Move on.", "next": "t2-scope" },
     "on_wrong":   { "reply": "Not quite. Try again." }
+  },
+
+  // A 'noise' task: persona DMs you and stays in character without grading.
+  // No points, never blocks the scored task in the same DM.
+  {
+    "id": "ceo-pressure",
+    "asks": "ceo",
+    "trigger": "start",
+    "is_noise": true,
+    "prompt": "Are we in the news? Should I be calling legal?"
   }
 ]
 ```
 
-`answer.type` supports `exact`, `contains`, `regex` in Swing 1. AI grading and
-hints arrive in Swing 2.
+### Answer types
+
+- `exact` — `{ "value": "...", "case_insensitive": true }` direct equality
+- `contains` — substring match
+- `regex` — `{ "pattern": "...", "case_insensitive": true }`
+- `ai_graded` — `{ "rubric": "..." }` — sends the prompt + rubric + attempt to
+  the active LLM (Claude/Gemini); model returns a strict JSON `{correct, rationale}`
+
+### Hints (interactive)
+
+After `after_attempts` wrong answers, the persona asks *"Want a hint? (costs N
+pts) Reply yes or no."* If the participant replies *yes*, the hint is revealed
+and `cost` is deducted from their score. *No* (or anything else) carries on.
+
+### Persona dual-mode
+
+When a task is active for a (run, persona), replies in that DM go through the
+grader. Outside of that — between tasks, on noise tasks, or after a task's
+completed — the persona stays in character via the AI provider, grounded in
+the scenario's `briefing`.
+
+## Instruqt integration
+
+Bind one Instruqt invite to one cohort. Set in the container:
+
+| Var | What it does |
+| --- | --- |
+| `INSTRUQT_MODE=true` | Enables auto sign-in via URL query params |
+| `INSTRUQT_INVITE_ID` | Used as the cohort's `join_code`; cohort is upserted on boot |
+| `INSTRUQT_SCENARIO_ID` | Which scenario the cohort runs |
+| `INSTRUQT_COHORT_NAME` | Display name shown in the sidebar / scoreboard |
+| `INSTRUQT_HOST_MODE=true` | Also creates a parallel `*-ADMIN` cohort for proctor dry-runs |
+
+Participants land at:
+
+```
+/?u=<unique-username>&n=<URL-encoded-display-name>
+```
+
+Server creates the user if needed, joins them to the invite's cohort, fires
+all `trigger:"start"` tasks, redirects to `/`. Hosts/proctors testing the
+track land at:
+
+```
+/?u=<unique-username>&n=<URL-encoded-display-name>&admin=1
+```
+
+→ which routes them into the admin sandbox cohort. No login screen, no join
+code entry. The host's existing process just needs to mint the URL with each
+Instruqt participant's identity.
+
+In Instruqt mode, `/` without `?u=` returns 400 — there's no manual login
+fallback (since the integration is the auth boundary).
+
+### Multi-instance / horizontal scaling
+
+Today the server is single-process: SQLite is a single-writer file and
+Socket.io rooms live in-memory. For multi-instance you'd swap to Postgres
+(schema is portable; all writes go through prepared statements) and add the
+`@socket.io/redis-adapter`. That's a separate refactor, not part of Swing 2.
+For an Instruqt-per-invite container, one process per cohort is the natural
+shape and works fine.
 
 ## Load vs. Run vs. Unload
 

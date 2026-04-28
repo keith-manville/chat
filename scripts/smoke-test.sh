@@ -94,32 +94,32 @@ node -e "const j=JSON.parse(process.argv[1]); if(j.channels.length!==0) process.
 echo "  ok  GET /api/channels is empty before joining a cohort"
 
 echo "==> Admin: create scenario"
-SC_DEF='{
-  "personas": [
-    { "username": "soc-analyst", "displayName": "Jordan (SOC)", "persona": "You are Jordan." }
-  ],
-  "instructions": {
-    "title": "Welcome to SOC Triage",
-    "body": "Reply to Jordan in DM.",
-    "links": [{ "label": "Chronicle", "url": "https://chronicle.security/" }]
-  },
-  "tasks": [
-    {
-      "id": "t1",
-      "asks": "soc-analyst",
-      "trigger": "start",
-      "prompt": "What ATT&CK technique was used? (sub-technique OK)",
-      "answer": { "type": "regex", "pattern": "^T1566(\\\\.[0-9]+)?$", "case_insensitive": true },
-      "points": 100,
-      "first_blood_bonus": 25,
-      "on_correct": { "reply": "Correct.", "next": "t2" },
-      "on_wrong":   { "reply": "Try again." }
-    }
-  ]
-}'
-SC_ID=$(adminJSON -X POST \
-  -d "{\"name\":\"smoke\",\"description\":\"smoke\",\"definition\":${SC_DEF}}" \
+SC_PAYLOAD="$(mktemp)"
+node -e '
+  const def = {
+    personas: [{ username: "soc-analyst", displayName: "Jordan (SOC)", persona: "You are Jordan." }],
+    instructions: {
+      title: "Welcome to SOC Triage",
+      body: "Reply to Jordan in DM.",
+      links: [{ label: "Chronicle", url: "https://chronicle.security/" }]
+    },
+    tasks: [{
+      id: "t1",
+      asks: "soc-analyst",
+      trigger: "start",
+      prompt: "What ATT&CK technique was used? (sub-technique OK)",
+      answer: { type: "regex", pattern: "^T1566(\\.[0-9]+)?$", case_insensitive: true },
+      points: 100,
+      first_blood_bonus: 25,
+      on_correct: { reply: "Correct.", next: "t2" },
+      on_wrong:   { reply: "Try again." }
+    }]
+  };
+  process.stdout.write(JSON.stringify({ name: "smoke", description: "smoke", definition: def }));
+' > "${SC_PAYLOAD}"
+SC_ID=$(adminJSON -X POST --data-binary "@${SC_PAYLOAD}" \
   "${BASE}/api/admin/scenarios" | node -e "let d='';process.stdin.on('data',c=>d+=c).on('end',()=>{console.log(JSON.parse(d).id)})")
+rm -f "${SC_PAYLOAD}"
 echo "  ok  POST /api/admin/scenarios -> ${SC_ID}"
 
 echo "==> Admin: create cohort"
@@ -178,6 +178,8 @@ echo "==> Scoreboard: empty cohort starts at zero"
 SB=$(me "${BASE}/api/scoreboard/${COH_ID}")
 node -e "const j=JSON.parse(process.argv[1]); if(j.runs.length!==1) process.exit(1); if(j.runs[0].score!==0) process.exit(2)" "${SB}"
 echo "  ok  GET /api/scoreboard/:id shows alex with score 0"
+node -e "const j=JSON.parse(process.argv[1]); if(j.tasksTotal!==1) process.exit(1); if(j.runs[0].tasksCompleted!==0||j.runs[0].tasksTotal!==1) process.exit(2)" "${SB}"
+echo "  ok  scoreboard reports tasksTotal=1 and tasksCompleted=0"
 
 echo "==> Read-only enforcement"
 INSTR_DATA="{\"channelId\":\"${INSTR_ID}\",\"body\":\"hi\"}"
@@ -185,6 +187,18 @@ INSTR_DATA="{\"channelId\":\"${INSTR_ID}\",\"body\":\"hi\"}"
 # socket-based send and instead verify the policy column is exposed.
 node -e "const j=JSON.parse(process.argv[1]); const ch=j.channels.find(c=>c.displayName==='instructions'); if(ch.postingPolicy!=='engine') process.exit(1)" "${CHANS}"
 echo "  ok  #instructions posting_policy=engine"
+
+echo "==> Task grading via Socket.io"
+DM_NAME=$(node -e "console.log(JSON.parse(process.argv[1]).channels.find(c=>c.isDm).name)" "${CHANS}")
+GRADE_OUT=$(node scripts/socket-task-test.js "${BASE}" "${COOKIE_JAR}" "${DM_ID}" "T1566.001" 2>&1)
+echo "${GRADE_OUT}" | grep -q "graded:correct" \
+  && echo "  ok  correct answer scored via socket" \
+  || (echo "!! grading test failed: ${GRADE_OUT}" && exit 1)
+
+# Confirm score moved
+SB=$(me "${BASE}/api/scoreboard/${COH_ID}")
+node -e "const j=JSON.parse(process.argv[1]); const r=j.runs[0]; if(r.score!==125) process.exit(1); if(r.tasksCompleted!==1) process.exit(2)" "${SB}"
+echo "  ok  scoreboard shows score=125 (100 + 25 first-blood) and tasksCompleted=1/1"
 
 echo "==> Admin: announce broadcast"
 adminJSON -X POST \
@@ -204,5 +218,49 @@ assert_status 400 "POST /api/admin/github/sync with no token" \
   -X POST -H 'Content-Type: application/json' \
   -H "x-admin-token: ${ADMIN_TOKEN}" \
   -d '{"repo":"acme/scenarios"}' "${BASE}/api/admin/github/sync"
+
+# ---- Instruqt mode in a *second* server instance (different port + data dir).
+echo "==> Instruqt mode: auto sign-in"
+INSTRUQT_PORT=$((PORT + 100))
+INSTRUQT_DATA="$(mktemp -d)"
+INSTRUQT_INVITE="INVITE-XYZ789"
+PORT="${INSTRUQT_PORT}" ADMIN_TOKEN="${ADMIN_TOKEN}" DATA_DIR="${INSTRUQT_DATA}" \
+  INSTRUQT_MODE=true \
+  INSTRUQT_INVITE_ID="${INSTRUQT_INVITE}" \
+  INSTRUQT_HOST_MODE=true \
+  node server.js >/tmp/instruqt-server.log 2>&1 &
+INSTRUQT_PID=$!
+trap "kill ${INSTRUQT_PID} 2>/dev/null; rm -rf ${INSTRUQT_DATA}; ${trap_cleanup_orig:-true}" EXIT 2>/dev/null || true
+
+for i in {1..40}; do
+  if curl -fsS "http://127.0.0.1:${INSTRUQT_PORT}/api/health" >/dev/null 2>&1; then break; fi
+  if ! kill -0 "${INSTRUQT_PID}" 2>/dev/null; then
+    echo "!! Instruqt server exited. Log:"; cat /tmp/instruqt-server.log; exit 1
+  fi
+  sleep 0.25
+done
+
+# In Instruqt mode with no scenario set, the cohort still upserts but lacks a
+# scenario_id. The auto sign-in route should still create the user account.
+INSTRUQT_JAR="$(mktemp)"
+LANDING=$(curl -s -o /dev/null -w "%{http_code}" \
+  "http://127.0.0.1:${INSTRUQT_PORT}/?u=alice&n=Alice")
+# 302 = redirect after auto sign-in (server has no scenario, so cohort join may
+# fail silently, but user creation + cookie set should succeed).
+if [[ "${LANDING}" != "302" && "${LANDING}" != "307" && "${LANDING}" != "303" ]]; then
+  echo "!! Instruqt auto sign-in expected redirect, got ${LANDING}"
+  cat /tmp/instruqt-server.log
+  exit 1
+fi
+echo "  ok  Instruqt-mode landing redirects after auto sign-in (${LANDING})"
+
+# Without u= param the landing should refuse (since there's no fallback login UI in instruqt mode).
+NO_U=$(curl -s -o /dev/null -w "%{http_code}" "http://127.0.0.1:${INSTRUQT_PORT}/")
+[[ "${NO_U}" == "400" ]] || (echo "!! Instruqt mode without ?u= expected 400, got ${NO_U}" && exit 1)
+echo "  ok  Instruqt mode without ?u= rejects with 400"
+
+kill ${INSTRUQT_PID} 2>/dev/null || true
+wait ${INSTRUQT_PID} 2>/dev/null || true
+rm -rf "${INSTRUQT_DATA}" "${INSTRUQT_JAR}"
 
 echo "==> All smoke tests passed"

@@ -403,25 +403,46 @@ app.post('/api/cohorts/join', requireUser, async (req, res) => {
 
 // ---------- Scoreboard ----------
 
+function buildScoreboard(cohortId) {
+  const cohort = cohortsLib.getCohort(cohortId);
+  if (!cohort) return null;
+  const sc = scenarios.getScenario(cohort.scenarioId);
+  const allTasks = (sc && sc.definition && sc.definition.tasks) || [];
+  const tasksTotal = allTasks.filter((t) => !t.is_noise).length;
+  const runs = cohortsLib.listRuns(cohort.id).map((r, idx) => {
+    let tasksCompleted = 0;
+    try {
+      const state = JSON.parse(r.state_json || '{}');
+      const completed = Array.isArray(state.completed) ? state.completed : [];
+      // Only count completions that are non-noise tasks.
+      tasksCompleted = completed.filter((id) =>
+        allTasks.find((t) => t.id === id && !t.is_noise)
+      ).length;
+    } catch { /* ignore */ }
+    return {
+      rank: idx + 1,
+      userId: r.user_id,
+      displayName: r.display_name,
+      username: r.username,
+      avatarColor: r.avatar_color,
+      score: r.score,
+      hintsUsed: r.hints_used || 0,
+      tasksCompleted,
+      tasksTotal,
+      lastActivityAt: r.last_activity_at,
+      completed: !!r.completed_at || (tasksTotal > 0 && tasksCompleted >= tasksTotal),
+    };
+  });
+  return { cohort, tasksTotal, runs };
+}
+
 app.get('/api/scoreboard/:cohortId', requireUser, (req, res) => {
-  // Visibility check: user must be a member of the cohort, or admin.
   const member = cohortsLib.getMembership(req.params.cohortId, req.user.id);
   const isAdmin = (req.cookies && req.cookies.admin_token) === ADMIN_TOKEN;
   if (!member && !isAdmin) return res.status(403).json({ error: 'not_a_member' });
-  const cohort = cohortsLib.getCohort(req.params.cohortId);
-  if (!cohort) return res.status(404).json({ error: 'cohort_not_found' });
-  const runs = cohortsLib.listRuns(cohort.id).map((r, idx) => ({
-    rank: idx + 1,
-    userId: r.user_id,
-    displayName: r.display_name,
-    username: r.username,
-    avatarColor: r.avatar_color,
-    score: r.score,
-    hintsUsed: r.hints_used || 0,
-    lastActivityAt: r.last_activity_at,
-    completed: !!r.completed_at,
-  }));
-  res.json({ cohort, runs });
+  const data = buildScoreboard(req.params.cohortId);
+  if (!data) return res.status(404).json({ error: 'cohort_not_found' });
+  res.json(data);
 });
 
 // ---------- Admin / persona / scenario API ----------
@@ -744,18 +765,13 @@ async function fireFollowUpTasks({ run, followUps }) {
 }
 
 function emitScoreUpdate(cohortId) {
-  const runs = cohortsLib.listRuns(cohortId).map((r, idx) => ({
-    rank: idx + 1,
-    userId: r.user_id,
-    displayName: r.display_name,
-    username: r.username,
-    avatarColor: r.avatar_color,
-    score: r.score,
-    hintsUsed: r.hints_used || 0,
-    lastActivityAt: r.last_activity_at,
-    completed: !!r.completed_at,
-  }));
-  io.to(`cohort:${cohortId}:scoreboard`).emit('scoreboard:update', { cohortId, runs });
+  const data = buildScoreboard(cohortId);
+  if (!data) return;
+  io.to(`cohort:${cohortId}:scoreboard`).emit('scoreboard:update', {
+    cohortId,
+    tasksTotal: data.tasksTotal,
+    runs: data.runs,
+  });
 }
 
 /**
@@ -779,7 +795,7 @@ async function maybeGradePersonaDmReply({ user, channel, body }) {
   const sc = scenarios.getScenario(run.scenario_id);
   if (!sc) return false;
 
-  const result = tasks.gradeReply({
+  const result = await tasks.gradeReply({
     run,
     scenario: sc,
     personaUsername: other.username,
@@ -787,34 +803,55 @@ async function maybeGradePersonaDmReply({ user, channel, body }) {
   });
   if (!result.handled) return false;
 
-  // React in the DM as the persona.
-  if (result.correct) {
+  const reply = async (text) => {
+    await postMessage({
+      channelId: channel.id,
+      userId: other.id,
+      body: text,
+      bypassPolicy: true,
+    });
+  };
+
+  if (result.kind === 'correct') {
     const head = result.firstBlood
       ? `🩸 *First blood!* +${result.points} pts.`
       : `✅ +${result.points} pts.`;
-    const reply = result.onCorrectReply || 'Correct.';
-    await postMessage({
-      channelId: channel.id,
-      userId: other.id,
-      body: `${head}\n${reply}`,
-      bypassPolicy: true,
-    });
+    const tail = result.onCorrectReply ? `\n${result.onCorrectReply}` : '';
+    await reply(`${head}${tail}`);
     emitScoreUpdate(channel.cohort_id);
     if (result.followUps && result.followUps.length) {
-      // Reload run since score / state changed.
       const refreshed = cohortsLib.getRun(channel.cohort_id, user.id);
       await fireFollowUpTasks({ run: refreshed, followUps: result.followUps });
     }
-  } else {
-    const reply = result.onWrongReply || 'Not quite.';
-    const tail = result.exhausted ? '\n(No more attempts on this one — moving on.)' : '';
-    await postMessage({
-      channelId: channel.id,
-      userId: other.id,
-      body: `❌ ${reply}${tail}`,
-      bypassPolicy: true,
-    });
+    return true;
   }
+
+  if (result.kind === 'wrong') {
+    const head = `❌ ${result.onWrongReply || 'Not quite.'}`;
+    const exhaustTail = result.exhausted
+      ? '\n(No more attempts on this one — moving on.)'
+      : '';
+    let body = head + exhaustTail;
+    if (result.hintOffer) {
+      const cost = result.hintCost ? ` (costs ${result.hintCost} pts)` : '';
+      body += `\n\nWant a hint?${cost} Reply *yes* or *no*.`;
+    }
+    await reply(body);
+    return true;
+  }
+
+  if (result.kind === 'hint_revealed') {
+    const cost = result.cost ? ` (-${result.cost} pts)` : '';
+    await reply(`💡 *Hint${cost}:* ${result.hintText}`);
+    emitScoreUpdate(channel.cohort_id);
+    return true;
+  }
+
+  if (result.kind === 'hint_declined') {
+    await reply('Got it. Take another shot.');
+    return true;
+  }
+
   return true;
 }
 
@@ -1024,15 +1061,24 @@ async function maybeTriggerBots({ channel, triggerMessage }) {
 
 // ---------- HTML routes ----------
 
-app.get('/', (req, res) => {
+app.get('/', async (req, res) => {
+  if (await tryInstruqtAutoSignIn(req, res)) return;
   const user = getUserBySession(req);
-  if (!user) return res.sendFile(path.join(__dirname, 'public', 'login.html'));
+  if (!user) {
+    if (INSTRUQT_MODE) {
+      return res.status(400).send(
+        'Instruqt mode is enabled. Open this app via your Instruqt sandbox URL, which must include ?u=<username>.'
+      );
+    }
+    return res.sendFile(path.join(__dirname, 'public', 'login.html'));
+  }
   const cohort = cohortsLib.getUserPrimaryCohort(user.id);
   if (!cohort) return res.sendFile(path.join(__dirname, 'public', 'join.html'));
   res.sendFile(path.join(__dirname, 'public', 'app.html'));
 });
 
-app.get('/join', (req, res) => {
+app.get('/join', async (req, res) => {
+  if (await tryInstruqtAutoSignIn(req, res)) return;
   const user = getUserBySession(req);
   if (!user) return res.sendFile(path.join(__dirname, 'public', 'login.html'));
   res.sendFile(path.join(__dirname, 'public', 'join.html'));
@@ -1046,7 +1092,89 @@ app.get('/admin', (_req, res) => {
   res.sendFile(path.join(__dirname, 'public', 'admin.html'));
 });
 
+// ---------- Instruqt bootstrap ----------
+//
+// Container env contract:
+//   INSTRUQT_MODE            - 'true' to enable auto-login + bootstrap
+//   INSTRUQT_INVITE_ID       - used as the cohort join_code (the participant cohort)
+//   INSTRUQT_SCENARIO_ID     - which scenario the cohort runs
+//   INSTRUQT_COHORT_NAME     - display name (optional)
+//   INSTRUQT_HOST_MODE       - 'true' to also create an admin/sandbox cohort
+
+const INSTRUQT_MODE = String(process.env.INSTRUQT_MODE || '').toLowerCase() === 'true';
+const INSTRUQT_INVITE_ID = process.env.INSTRUQT_INVITE_ID || '';
+const INSTRUQT_SCENARIO_ID = process.env.INSTRUQT_SCENARIO_ID || '';
+const INSTRUQT_COHORT_NAME = process.env.INSTRUQT_COHORT_NAME || 'Instruqt cohort';
+const INSTRUQT_HOST_MODE = String(process.env.INSTRUQT_HOST_MODE || '').toLowerCase() === 'true';
+
+let instruqtCohort = null;
+let adminCohort = null;
+
+function bootstrapInstruqtCohorts() {
+  if (!INSTRUQT_MODE) return;
+  if (!INSTRUQT_INVITE_ID) {
+    console.warn('[instruqt] INSTRUQT_MODE=true but no INSTRUQT_INVITE_ID set; skipping bootstrap.');
+    return;
+  }
+  try {
+    instruqtCohort = cohortsLib.ensureCohort({
+      joinCode: INSTRUQT_INVITE_ID,
+      scenarioId: INSTRUQT_SCENARIO_ID || undefined,
+      name: INSTRUQT_COHORT_NAME,
+    });
+    console.log(`[instruqt] participant cohort: ${instruqtCohort.name} (code ${instruqtCohort.joinCode})`);
+    if (INSTRUQT_HOST_MODE) {
+      const adminCode = (INSTRUQT_INVITE_ID + '-ADMIN').toUpperCase();
+      adminCohort = cohortsLib.ensureCohort({
+        joinCode: adminCode,
+        scenarioId: INSTRUQT_SCENARIO_ID || undefined,
+        name: `${INSTRUQT_COHORT_NAME} — Admin sandbox`,
+      });
+      console.log(`[instruqt] admin sandbox cohort: ${adminCohort.name} (code ${adminCohort.joinCode})`);
+    }
+  } catch (err) {
+    console.error('[instruqt] bootstrap failed:', err.message);
+  }
+}
+
+// ---------- Auto sign-in helper (called from / and /join handlers) ----------
+
+async function tryInstruqtAutoSignIn(req, res) {
+  if (!INSTRUQT_MODE) return false;
+  if (req.cookies && req.cookies.sid) return false;
+  const u = (req.query.u || '').toString().trim();
+  const n = (req.query.n || '').toString().trim();
+  const wantAdmin = String(req.query.admin || '') === '1';
+  if (!u || !/^[a-zA-Z0-9_.-]{2,32}$/.test(u)) return false;
+  let user = db
+    .prepare('SELECT * FROM users WHERE workspace_id = ? AND username = ?')
+    .get(defaultWorkspaceId, u);
+  if (!user) {
+    const id = newId('u');
+    db.prepare(
+      'INSERT INTO users (id, workspace_id, username, display_name, avatar_color, is_bot, created_at) VALUES (?, ?, ?, ?, ?, 0, ?)'
+    ).run(id, defaultWorkspaceId, u, n || u, pickAvatarColor(u), Date.now());
+    user = db.prepare('SELECT * FROM users WHERE id = ?').get(id);
+  }
+  const targetCohort = wantAdmin ? adminCohort : instruqtCohort;
+  if (targetCohort) {
+    try {
+      const result = cohortsLib.joinCohort({ code: targetCohort.joinCode, userId: user.id });
+      populateInstructionsIfEmpty(targetCohort);
+      if (result.isNewRun) await fireStartTasksForRun(result.run);
+    } catch (err) {
+      console.warn('[instruqt] auto-join failed:', err.message);
+    }
+  }
+  res.cookie('sid', user.id, { httpOnly: true, sameSite: 'lax' });
+  res.redirect('/');
+  return true;
+}
+
+// ---------- listen ----------
+
 const PORT = parseInt(process.env.PORT, 10) || 3000;
+bootstrapInstruqtCohorts();
 server.listen(PORT, () => {
   console.log(`Slack-clone listening on :${PORT}`);
   console.log(`Workspace: ${defaultWorkspaceId}`);
@@ -1056,5 +1184,9 @@ server.listen(PORT, () => {
     );
   } else {
     console.log(`[personas] AI provider: ${personas.getProvider()} (model: ${personas.getModel()})`);
+  }
+  if (INSTRUQT_MODE) {
+    console.log(`[instruqt] mode enabled. Participant URL: /?u=<id>&n=<displayName>`);
+    if (INSTRUQT_HOST_MODE) console.log(`[instruqt] host URL: /?u=<id>&n=<displayName>&admin=1`);
   }
 });
