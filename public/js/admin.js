@@ -280,6 +280,110 @@ function setupScenarioForm() {
   });
 }
 
+// ---------- Cohorts ----------
+
+async function refreshCohorts() {
+  const [cohortsRes, scenariosRes] = await Promise.all([
+    api('/api/admin/cohorts'),
+    api('/api/admin/scenarios'),
+  ]);
+
+  // Populate scenario dropdown
+  const sel = document.getElementById('coh-scenario');
+  sel.innerHTML = '';
+  if (!scenariosRes.scenarios.length) {
+    const opt = document.createElement('option');
+    opt.textContent = 'No scenarios — create one in the Scenarios tab first';
+    opt.disabled = true; opt.selected = true;
+    sel.appendChild(opt);
+  } else {
+    for (const s of scenariosRes.scenarios) {
+      const opt = document.createElement('option');
+      opt.value = s.id;
+      opt.textContent = `${s.name} (${s.source})`;
+      sel.appendChild(opt);
+    }
+  }
+
+  const ul = document.getElementById('coh-list');
+  ul.innerHTML = '';
+  if (!cohortsRes.cohorts.length) {
+    const li = document.createElement('li');
+    li.innerHTML = '<span class="muted">No cohorts yet.</span>';
+    ul.appendChild(li);
+    return;
+  }
+  for (const c of cohortsRes.cohorts) {
+    const li = document.createElement('li');
+    li.innerHTML = `
+      <div class="scenario-row">
+        <div class="row-top">
+          <strong>${escapeHtml(c.name)}</strong>
+          <span class="pill" style="background:#1A1D21;color:#fff;font-family:monospace;letter-spacing:1px;">${escapeHtml(c.joinCode)}</span>
+          <small class="muted">${c.memberCount} member${c.memberCount === 1 ? '' : 's'}</small>
+        </div>
+        <div class="row-actions">
+          <button data-act="scoreboard">Open scoreboard</button>
+          <button data-act="broadcast" class="ghost">Broadcast</button>
+        </div>
+      </div>
+    `;
+    li.addEventListener('click', (e) => {
+      const act = e.target.dataset.act;
+      if (act === 'scoreboard') {
+        window.open('/scoreboard?cohort=' + encodeURIComponent(c.id), '_blank');
+      } else if (act === 'broadcast') {
+        const card = document.getElementById('coh-broadcast-card');
+        card.style.display = 'block';
+        card.dataset.cohortId = c.id;
+        document.getElementById('coh-broadcast-name').textContent = c.name;
+        document.getElementById('coh-broadcast-body').focus();
+      }
+    });
+    ul.appendChild(li);
+  }
+}
+
+function setupCohortForm() {
+  document.getElementById('coh-create').addEventListener('click', async () => {
+    const errBox = document.getElementById('coh-error');
+    errBox.textContent = '';
+    const name = document.getElementById('coh-name').value.trim();
+    const scenarioId = document.getElementById('coh-scenario').value;
+    if (!scenarioId) { errBox.textContent = 'Pick a scenario.'; return; }
+    try {
+      await api('/api/admin/cohorts', {
+        method: 'POST',
+        body: JSON.stringify({ name: name || undefined, scenarioId }),
+      });
+      document.getElementById('coh-name').value = '';
+      await refreshCohorts();
+    } catch (err) {
+      errBox.textContent = err.message;
+    }
+  });
+  document.getElementById('coh-broadcast-send').addEventListener('click', async () => {
+    const card = document.getElementById('coh-broadcast-card');
+    const id = card.dataset.cohortId;
+    const body = document.getElementById('coh-broadcast-body').value;
+    const status = document.getElementById('coh-broadcast-status');
+    status.style.color = '';
+    status.textContent = 'Sending...';
+    try {
+      await api(`/api/admin/cohorts/${id}/announce`, {
+        method: 'POST',
+        body: JSON.stringify({ body }),
+      });
+      status.style.color = '#2BAC76';
+      status.textContent = 'Sent.';
+      document.getElementById('coh-broadcast-body').value = '';
+    } catch (err) {
+      status.style.color = '#e01e5a';
+      status.textContent = 'Error: ' + err.message;
+    }
+  });
+}
+
 // ---------- GitHub sync ----------
 
 function setupGithubSync() {
@@ -386,8 +490,9 @@ document.getElementById('admin-login').addEventListener('click', async () => {
     setupScenarioForm();
     setupGithubSync();
     setupActiveBanner();
+    setupCohortForm();
     await refreshState();
-    await Promise.all([refreshPersonas(), refreshScenarios()]);
+    await Promise.all([refreshPersonas(), refreshScenarios(), refreshCohorts()]);
   } catch (err) {
     errBox.textContent = err.message;
   }

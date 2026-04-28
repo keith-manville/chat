@@ -1,0 +1,36 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Scoreboard</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Lato:wght@400;700;900&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="/css/slack.css" />
+</head>
+<body class="scoreboard-body">
+  <header class="scoreboard-header">
+    <div>
+      <h1 id="cohort-name">Scoreboard</h1>
+      <div class="muted" id="cohort-meta"></div>
+    </div>
+    <div class="scoreboard-stats">
+      <div><div class="stat-num" id="stat-players">0</div><div class="stat-label">players</div></div>
+      <div><div class="stat-num" id="stat-top">0</div><div class="stat-label">top score</div></div>
+    </div>
+  </header>
+
+  <main class="scoreboard-main">
+    <table class="scoreboard-table">
+      <thead>
+        <tr><th>#</th><th>Player</th><th class="num">Score</th><th class="num">Hints</th><th>Last activity</th></tr>
+      </thead>
+      <tbody id="rows"><tr><td colspan="5" class="muted">Loading...</td></tr></tbody>
+    </table>
+  </main>
+
+  <script src="/socket.io/socket.io.js"></script>
+  <script src="/js/scoreboard.js"></script>
+</body>
+</html>

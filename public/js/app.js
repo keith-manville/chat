@@ -3,6 +3,7 @@
 const state = {
   me: null,
   workspace: null,
+  cohort: null,
   channels: [],
   currentChannelId: null,
   users: [],
@@ -96,17 +97,30 @@ async function api(path, opts = {}) {
 
 // ---------- Sidebar ----------
 
+function channelDisplayName(c) {
+  return c.displayName || c.name;
+}
+
+function dmPeerId(channel) {
+  // Cohort DM names look like "dm:<cohortId>:<userIdA>:<userIdB>"
+  const parts = channel.name.split(':');
+  // parts[0] = "dm". Skip that and the cohort id (if present), find the id != me.
+  const ids = parts.slice(1).filter((p) => p !== state.me.id && !p.startsWith('coh_'));
+  return ids[ids.length - 1] || null;
+}
+
 function dmLabelFor(channel) {
-  if (!channel.isDm) return channel.name;
-  const otherId = channel.name.split(':').slice(1).find((id) => id !== state.me.id);
+  if (!channel.isDm) return channelDisplayName(channel);
+  const otherId = dmPeerId(channel);
   const other = state.users.find((u) => u.id === otherId);
   return other ? other.displayName : 'Direct message';
 }
 
 function renderSidebar() {
-  document.getElementById('ws-name').textContent = state.workspace.name;
+  const wsName = state.cohort ? state.cohort.name : state.workspace.name;
+  document.getElementById('ws-name').textContent = wsName;
   document.getElementById('me-name').textContent = state.me.displayName;
-  document.getElementById('rail-ws').textContent = state.workspace.name[0] || 'W';
+  document.getElementById('rail-ws').textContent = (wsName && wsName[0]) || 'W';
 
   const list = document.getElementById('channel-list');
   list.innerHTML = '';
@@ -117,7 +131,7 @@ function renderSidebar() {
       onclick: () => selectChannel(c.id),
     },
       el('span', { class: 'hash' }, '#'),
-      el('span', {}, c.name)
+      el('span', {}, channelDisplayName(c))
     );
     list.appendChild(li);
   }
@@ -125,7 +139,7 @@ function renderSidebar() {
   const dmList = document.getElementById('dm-list');
   dmList.innerHTML = '';
   for (const c of state.channels.filter((x) => x.isDm)) {
-    const otherId = c.name.split(':').slice(1).find((id) => id !== state.me.id);
+    const otherId = dmPeerId(c);
     const other = state.users.find((u) => u.id === otherId);
     const online = other && (other.online || other.isBot);
     const li = el('li', {
@@ -162,7 +176,7 @@ async function selectChannel(channelId) {
   if (!channel) return;
   document.getElementById('channel-name').textContent = channel.isDm
     ? dmLabelFor(channel)
-    : channel.name;
+    : channelDisplayName(channel);
   document.getElementById('channel-topic').textContent = channel.topic || '';
   document.querySelector('.channel-title .hash').style.display = channel.isDm ? 'none' : 'inline';
   document.getElementById('typing-indicator').textContent = '';
@@ -561,29 +575,7 @@ function hideEmojiPicker() {
 // ---------- Channel modal ----------
 
 function setupModal() {
-  const backdrop = document.getElementById('modal-backdrop');
-  const open = () => { backdrop.hidden = false; };
-  const close = () => { backdrop.hidden = true; document.getElementById('modal-error').textContent = ''; };
-  document.getElementById('add-channel').addEventListener('click', open);
-  document.getElementById('modal-cancel').addEventListener('click', close);
-  backdrop.addEventListener('click', (e) => { if (e.target === backdrop) close(); });
-  document.getElementById('create-channel-form').addEventListener('submit', async (e) => {
-    e.preventDefault();
-    const fd = new FormData(e.target);
-    try {
-      const data = await api('/api/channels', { method: 'POST', body: JSON.stringify({
-        name: fd.get('name').trim(),
-        topic: (fd.get('topic') || '').trim(),
-      })});
-      state.channels.push(data.channel);
-      renderSidebar();
-      selectChannel(data.channel.id);
-      e.target.reset();
-      close();
-    } catch (err) {
-      document.getElementById('modal-error').textContent = err.message;
-    }
-  });
+  // Channel creation is template-driven per cohort in Swing 1; no UI hook.
 }
 
 // ---------- Socket ----------
@@ -617,6 +609,10 @@ function setupSocket() {
     if (u) u.online = false;
     renderSidebar();
   });
+  socket.on('cohort:joined', () => {
+    // Refresh after server has materialized channels and DMs.
+    window.location.reload();
+  });
 }
 
 // ---------- Boot ----------
@@ -626,6 +622,11 @@ function setupSocket() {
     const me = await api('/api/me');
     state.me = me.user;
     state.workspace = me.workspace;
+    state.cohort = me.cohort || null;
+    if (!state.cohort) {
+      window.location.href = '/join';
+      return;
+    }
     const [chRes, usersRes] = await Promise.all([
       api('/api/channels'),
       api('/api/users'),

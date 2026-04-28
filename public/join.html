@@ -1,0 +1,64 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Join a cohort</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Lato:wght@400;700;900&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="/css/slack.css" />
+</head>
+<body class="login-body">
+  <main class="login-card">
+    <div class="login-logo">
+      <span class="logo-square" style="background:#4A154B"></span>
+      <span class="logo-square" style="background:#36C5F0"></span>
+      <span class="logo-square" style="background:#2EB67D"></span>
+      <span class="logo-square" style="background:#ECB22E"></span>
+    </div>
+    <h1>Enter your join code</h1>
+    <p class="muted">Your event proctor gave you an 8-character code. Enter it to drop into your cohort.</p>
+    <form id="join-form">
+      <label>
+        <span>Join code</span>
+        <input id="code" name="code" autocomplete="off" required style="text-transform:uppercase;font-family:'Monaco','Menlo',monospace;letter-spacing:2px;font-size:18px;text-align:center;" maxlength="12" placeholder="A1B2C3D4" />
+      </label>
+      <button type="submit" class="primary">Join</button>
+      <p class="error" id="error"></p>
+    </form>
+    <div class="login-footer">
+      <a href="#" id="logout-link">Sign out</a>
+    </div>
+  </main>
+  <script>
+    document.getElementById('join-form').addEventListener('submit', async (e) => {
+      e.preventDefault();
+      const code = document.getElementById('code').value.trim().toUpperCase();
+      const errBox = document.getElementById('error');
+      errBox.textContent = '';
+      try {
+        const res = await fetch('/api/cohorts/join', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ code }),
+          credentials: 'include',
+        });
+        const data = await res.json();
+        if (!res.ok) {
+          errBox.textContent = data.error || 'Could not join';
+          return;
+        }
+        window.location.href = '/';
+      } catch (err) {
+        errBox.textContent = err.message;
+      }
+    });
+    document.getElementById('logout-link').addEventListener('click', async (e) => {
+      e.preventDefault();
+      await fetch('/api/auth/logout', { method: 'POST', credentials: 'include' });
+      window.location.href = '/';
+    });
+  </script>
+</body>
+</html>

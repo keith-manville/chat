@@ -90,6 +90,60 @@ CREATE TABLE IF NOT EXISTS app_state (
   updated_at INTEGER,
   FOREIGN KEY (workspace_id) REFERENCES workspaces(id) ON DELETE CASCADE
 );
+
+CREATE TABLE IF NOT EXISTS cohorts (
+  id TEXT PRIMARY KEY,
+  workspace_id TEXT NOT NULL,
+  scenario_id TEXT NOT NULL,
+  name TEXT NOT NULL,
+  join_code TEXT NOT NULL UNIQUE,
+  created_at INTEGER NOT NULL,
+  started_at INTEGER,
+  ends_at INTEGER,
+  closed_at INTEGER,
+  FOREIGN KEY (workspace_id) REFERENCES workspaces(id) ON DELETE CASCADE
+);
+
+CREATE TABLE IF NOT EXISTS cohort_members (
+  cohort_id TEXT NOT NULL,
+  user_id TEXT NOT NULL,
+  role TEXT NOT NULL DEFAULT 'participant',
+  joined_at INTEGER NOT NULL,
+  PRIMARY KEY (cohort_id, user_id),
+  FOREIGN KEY (cohort_id) REFERENCES cohorts(id) ON DELETE CASCADE,
+  FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+);
+
+CREATE TABLE IF NOT EXISTS game_runs (
+  id TEXT PRIMARY KEY,
+  cohort_id TEXT NOT NULL,
+  user_id TEXT NOT NULL,
+  scenario_id TEXT NOT NULL,
+  score INTEGER NOT NULL DEFAULT 0,
+  current_task_id TEXT,
+  hints_used INTEGER NOT NULL DEFAULT 0,
+  state_json TEXT,
+  started_at INTEGER NOT NULL,
+  completed_at INTEGER,
+  last_activity_at INTEGER,
+  UNIQUE (cohort_id, user_id),
+  FOREIGN KEY (cohort_id) REFERENCES cohorts(id) ON DELETE CASCADE,
+  FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+);
+
+CREATE TABLE IF NOT EXISTS task_attempts (
+  id TEXT PRIMARY KEY,
+  run_id TEXT NOT NULL,
+  task_id TEXT NOT NULL,
+  attempt_text TEXT NOT NULL,
+  is_correct INTEGER NOT NULL DEFAULT 0,
+  points_delta INTEGER NOT NULL DEFAULT 0,
+  was_first_blood INTEGER NOT NULL DEFAULT 0,
+  created_at INTEGER NOT NULL,
+  FOREIGN KEY (run_id) REFERENCES game_runs(id) ON DELETE CASCADE
+);
+CREATE INDEX IF NOT EXISTS idx_attempts_run ON task_attempts(run_id);
+CREATE INDEX IF NOT EXISTS idx_attempts_task ON task_attempts(task_id);
 `);
 
 // Idempotent migrations for older databases.
@@ -110,6 +164,10 @@ addColumnIfMissing('messages', 'reply_count', 'INTEGER NOT NULL DEFAULT 0');
 addColumnIfMissing('messages', 'last_reply_at', 'INTEGER');
 db.exec(`CREATE INDEX IF NOT EXISTS idx_messages_parent ON messages(parent_id);`);
 
+addColumnIfMissing('channels', 'cohort_id', 'TEXT');
+addColumnIfMissing('channels', 'display_name', 'TEXT');
+addColumnIfMissing('channels', 'posting_policy', "TEXT NOT NULL DEFAULT 'open'");
+
 db.exec(`CREATE UNIQUE INDEX IF NOT EXISTS idx_scenarios_source_ref
          ON scenarios(source_ref) WHERE source_ref IS NOT NULL;`);
 
@@ -125,16 +183,8 @@ function bootstrap() {
     now
   );
 
-  const channels = [
-    { name: 'general', topic: 'Company-wide announcements and work-based matters' },
-    { name: 'random', topic: 'Non-work banter and water cooler conversation' },
-    { name: 'incident-response', topic: 'Active incident coordination' },
-  ];
-  for (const c of channels) {
-    db.prepare(
-      'INSERT INTO channels (id, workspace_id, name, topic, is_private, is_dm, created_at) VALUES (?, ?, ?, ?, 0, 0, ?)'
-    ).run('ch_' + Math.random().toString(36).slice(2, 10), wsId, c.name, c.topic, now);
-  }
+  // No default channels seeded. Cohort channels are materialized on cohort
+  // creation; participants land on the join screen until they're in a cohort.
   return wsId;
 }
 

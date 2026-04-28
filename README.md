@@ -115,6 +115,64 @@ when stored in your scenarios repo (see "Loading scenarios from GitHub" below).
 - See [`scenarios/example.json`](./scenarios/example.json) — load it via the
   *Scenarios* tab → *Load example* to try it out.
 
+## Cohorts, tasks, and the scoreboard (Swing 1)
+
+The chat is built around **cohorts** of participants playing the same scenario:
+
+1. **Proctor** opens `/admin` → *Cohorts* tab → picks a scenario → *Create cohort*.
+   The console shows an 8-character **join code**.
+2. **Participant** signs in at `/`, lands on the join screen, enters the code.
+   The cohort's channel template is materialized for them:
+   - `#general` (cohort chat, posting open)
+   - `#instructions` (read-only; seeded from the scenario's `instructions` block)
+   - `#announcements` (proctor-only; broadcast from admin console)
+   - `#scoreboard` (engine-only; live scoreboard channel)
+   - DMs with each persona declared in the scenario
+3. The engine fires every task with `trigger: "start"` — each task's
+   "asks" persona DMs the participant the prompt.
+4. The participant replies in that DM. The engine grades (`exact` / `regex` /
+   `contains`), posts the persona's reaction, and schedules follow-ups
+   (`trigger: "after:<task-id>"`).
+5. **First blood** (first correct answer to a task within the cohort) earns
+   the configured bonus.
+6. **Scoreboard** lives at `/scoreboard?cohort=<id>` — opened from the admin
+   console in a new tab. It updates live via Socket.io.
+
+**Cohort isolation:** participants only see their own cohort's channels and
+DMs; cohorts can't chat across boundaries. Same cohort gets an aubergine-style
+private workspace.
+
+**Late join:** every cohort member starts at `trigger: "start"` regardless of
+when they joined.
+
+**Proctor identity:** Swing 1 doesn't have a chat-side proctor user — the
+admin console drives the only proctor capabilities (broadcast to a cohort's
+`#announcements`).
+
+## Scenario task model
+
+Tasks live alongside `personas` and `events` in the scenario `definition`:
+
+```jsonc
+"tasks": [
+  {
+    "id": "t1-vector",
+    "asks": "soc-analyst",
+    "trigger": "start",
+    "prompt": "Alert just fired on a phishing email. What ATT&CK technique was used? (sub-technique OK)",
+    "answer": { "type": "regex", "pattern": "^T1566(\\.\\d+)?$", "case_insensitive": true },
+    "points": 100,
+    "first_blood_bonus": 25,
+    "max_attempts": 5,
+    "on_correct": { "reply": "Nice. Move on to scoping.", "next": "t2-scope" },
+    "on_wrong":   { "reply": "Not quite. Try again." }
+  }
+]
+```
+
+`answer.type` supports `exact`, `contains`, `regex` in Swing 1. AI grading and
+hints arrive in Swing 2.
+
 ## Load vs. Run vs. Unload
 
 A scenario has two distinct phases in the facilitator console:

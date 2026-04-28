@@ -23,12 +23,42 @@
 
     <div id="console-block" hidden>
       <nav class="tabs">
-        <button data-tab="personas" class="active">Personas</button>
-        <button data-tab="inject">Inject message</button>
+        <button data-tab="cohorts" class="active">Cohorts</button>
         <button data-tab="scenarios">Scenarios</button>
+        <button data-tab="personas">Personas</button>
+        <button data-tab="inject">Inject message</button>
       </nav>
 
-      <section class="admin-panel active" data-panel="personas">
+      <section class="admin-panel active" data-panel="cohorts">
+        <h2>Cohorts</h2>
+        <p class="muted">Each cohort runs one scenario. Share the join code with participants — they enter it after signing in.</p>
+
+        <div class="admin-grid">
+          <div class="admin-card">
+            <h3>New cohort</h3>
+            <label>Name (optional)</label>
+            <input id="coh-name" placeholder="Acme Blue Team — April 28" />
+            <label>Scenario</label>
+            <select id="coh-scenario"></select>
+            <button id="coh-create">Create cohort</button>
+            <p class="error" id="coh-error"></p>
+          </div>
+
+          <div class="admin-card">
+            <h3>Existing cohorts</h3>
+            <ul id="coh-list" class="admin-list"></ul>
+          </div>
+        </div>
+
+        <div class="admin-card" id="coh-broadcast-card" style="margin-top:14px;display:none;">
+          <h3>Broadcast to <span id="coh-broadcast-name"></span> #announcements</h3>
+          <textarea id="coh-broadcast-body" placeholder="Heads up team — 5 minute warning..."></textarea>
+          <button id="coh-broadcast-send">Post announcement</button>
+          <span class="muted" id="coh-broadcast-status" style="margin-left:10px;font-size:12px;"></span>
+        </div>
+      </section>
+
+      <section class="admin-panel" data-panel="personas">
         <h2>AI personas</h2>
         <div class="admin-grid">
           <div class="admin-card">

@@ -9,6 +9,8 @@ const { newId, pickAvatarColor } = require('./lib/util');
 const personas = require('./lib/personas');
 const scenarios = require('./lib/scenarios');
 const github = require('./lib/github');
+const cohortsLib = require('./lib/cohorts');
+const tasks = require('./lib/tasks');
 
 const SCENARIO_REPO_DEFAULT = process.env.SCENARIO_REPO || '';
 const SCENARIO_REPO_REF_DEFAULT = process.env.SCENARIO_REPO_REF || 'main';
@@ -62,22 +64,17 @@ function channelPublic(c) {
   return {
     id: c.id,
     name: c.name,
+    displayName: c.display_name || c.name,
     topic: c.topic || '',
     isPrivate: !!c.is_private,
     isDm: !!c.is_dm,
+    cohortId: c.cohort_id || null,
+    postingPolicy: c.posting_policy || 'open',
   };
 }
 
-function listChannelsForUser(userId, workspaceId) {
-  return db
-    .prepare(
-      `SELECT c.* FROM channels c
-       LEFT JOIN channel_members cm ON cm.channel_id = c.id AND cm.user_id = ?
-       WHERE c.workspace_id = ?
-         AND (c.is_private = 0 OR cm.user_id IS NOT NULL)
-       ORDER BY c.is_dm ASC, c.name ASC`
-    )
-    .all(userId, workspaceId);
+function listChannelsForUser(userId, _workspaceId) {
+  return cohortsLib.listVisibleChannels(userId);
 }
 
 function ensureMembership(channelId, userId) {
@@ -123,10 +120,22 @@ function presenceList() {
 
 // ---------- core post helper (used by REST, sockets, scenarios) ----------
 
-async function postMessage({ channelId, userId, body, parentId = null }) {
+async function postMessage({ channelId, userId, body, parentId = null, bypassPolicy = false }) {
   const channel = db.prepare('SELECT * FROM channels WHERE id = ?').get(channelId);
   const user = db.prepare('SELECT * FROM users WHERE id = ?').get(userId);
   if (!channel || !user) throw new Error('channel_or_user_missing');
+
+  // Posting policy enforcement (only for human-driven posts; engine bypasses).
+  if (!bypassPolicy && !user.is_bot) {
+    const policy = channel.posting_policy || 'open';
+    if (policy === 'engine' || policy === 'read_only') {
+      throw new Error('channel_is_read_only');
+    }
+    if (policy === 'proctor') {
+      // Proctors don't sign in as chat users in Swing 1; effectively bot/admin only.
+      throw new Error('proctor_only');
+    }
+  }
 
   let parent = null;
   if (parentId) {
@@ -236,14 +245,11 @@ app.post('/api/auth/login', (req, res) => {
       'INSERT INTO users (id, workspace_id, username, display_name, avatar_color, is_bot, created_at) VALUES (?, ?, ?, ?, ?, 0, ?)'
     ).run(id, defaultWorkspaceId, username, displayName || username, pickAvatarColor(username), Date.now());
     user = db.prepare('SELECT * FROM users WHERE id = ?').get(id);
-    // auto-join all public channels
-    const publicChans = db
-      .prepare('SELECT id FROM channels WHERE workspace_id = ? AND is_private = 0')
-      .all(defaultWorkspaceId);
-    for (const c of publicChans) ensureMembership(c.id, user.id);
   }
   res.cookie('sid', user.id, { httpOnly: true, sameSite: 'lax' });
-  res.json({ user: userPublic(user) });
+  // Don't auto-join channels — participants pick up channels by joining a cohort.
+  const cohort = cohortsLib.getUserPrimaryCohort(user.id);
+  res.json({ user: userPublic(user), cohort: cohort || null });
 });
 
 app.post('/api/auth/logout', (req, res) => {
@@ -252,9 +258,11 @@ app.post('/api/auth/logout', (req, res) => {
 });
 
 app.get('/api/me', requireUser, (req, res) => {
+  const cohort = cohortsLib.getUserPrimaryCohort(req.user.id);
   res.json({
     user: userPublic(req.user),
     workspace: { id: defaultWorkspaceId, name: db.prepare('SELECT name FROM workspaces WHERE id = ?').get(defaultWorkspaceId).name },
+    cohort: cohort || null,
   });
 });
 
@@ -370,6 +378,50 @@ app.post('/api/dms', requireUser, (req, res) => {
   if (!other) return res.status(404).json({ error: 'user_not_found' });
   const ch = findOrCreateDm(defaultWorkspaceId, req.user.id, other.id);
   res.json({ channel: channelPublic(ch), peer: userPublic(other) });
+});
+
+// ---------- Cohort join ----------
+
+app.post('/api/cohorts/join', requireUser, async (req, res) => {
+  const { code } = req.body || {};
+  if (!code) return res.status(400).json({ error: 'code_required' });
+  try {
+    const result = cohortsLib.joinCohort({ code, userId: req.user.id });
+    // Populate the cohort's #instructions with the scenario's instructions on first creation.
+    populateInstructionsIfEmpty(result.cohort);
+    // Fire any 'start' tasks for this brand-new run (catch-up mode for late joiners).
+    if (result.isNewRun) {
+      await fireStartTasksForRun(result.run);
+    }
+    // Force the user's socket(s) to refresh channels.
+    io.to(`user:${req.user.id}`).emit('cohort:joined', { cohort: result.cohort });
+    res.json({ cohort: result.cohort, isNewRun: result.isNewRun });
+  } catch (err) {
+    res.status(400).json({ error: err.message });
+  }
+});
+
+// ---------- Scoreboard ----------
+
+app.get('/api/scoreboard/:cohortId', requireUser, (req, res) => {
+  // Visibility check: user must be a member of the cohort, or admin.
+  const member = cohortsLib.getMembership(req.params.cohortId, req.user.id);
+  const isAdmin = (req.cookies && req.cookies.admin_token) === ADMIN_TOKEN;
+  if (!member && !isAdmin) return res.status(403).json({ error: 'not_a_member' });
+  const cohort = cohortsLib.getCohort(req.params.cohortId);
+  if (!cohort) return res.status(404).json({ error: 'cohort_not_found' });
+  const runs = cohortsLib.listRuns(cohort.id).map((r, idx) => ({
+    rank: idx + 1,
+    userId: r.user_id,
+    displayName: r.display_name,
+    username: r.username,
+    avatarColor: r.avatar_color,
+    score: r.score,
+    hintsUsed: r.hints_used || 0,
+    lastActivityAt: r.last_activity_at,
+    completed: !!r.completed_at,
+  }));
+  res.json({ cohort, runs });
 });
 
 // ---------- Admin / persona / scenario API ----------
@@ -537,6 +589,57 @@ app.post('/api/admin/github/sync', requireAdmin, async (req, res) => {
   }
 });
 
+// ---------- Admin: cohorts ----------
+
+app.get('/api/admin/cohorts', requireAdmin, (_req, res) => {
+  res.json({ cohorts: cohortsLib.listCohorts(defaultWorkspaceId) });
+});
+
+app.get('/api/admin/cohorts/:id', requireAdmin, (req, res) => {
+  const cohort = cohortsLib.getCohort(req.params.id);
+  if (!cohort) return res.status(404).json({ error: 'not_found' });
+  const members = cohortsLib.listMembers(cohort.id);
+  const runs = cohortsLib.listRuns(cohort.id);
+  res.json({ cohort, members, runs });
+});
+
+app.post('/api/admin/cohorts', requireAdmin, (req, res) => {
+  const { name, scenarioId } = req.body || {};
+  if (!scenarioId) return res.status(400).json({ error: 'scenarioId required' });
+  try {
+    const cohort = cohortsLib.createCohort({
+      workspaceId: defaultWorkspaceId,
+      scenarioId,
+      name,
+    });
+    res.json({ cohort });
+  } catch (err) {
+    res.status(400).json({ error: err.message });
+  }
+});
+
+app.post('/api/admin/cohorts/:id/announce', requireAdmin, async (req, res) => {
+  const { body } = req.body || {};
+  if (!body || !body.trim()) return res.status(400).json({ error: 'body_required' });
+  const cohort = cohortsLib.getCohort(req.params.id);
+  if (!cohort) return res.status(404).json({ error: 'cohort_not_found' });
+  const announce = cohortsLib.getCohortChannel({
+    cohortId: cohort.id,
+    displayName: 'announcements',
+  });
+  if (!announce) return res.status(404).json({ error: 'announcements_channel_missing' });
+  // Use a "Proctor" bot user so the post has a recognizable author.
+  const proctor = personas.ensureBot({
+    workspaceId: defaultWorkspaceId,
+    username: 'proctor',
+    displayName: 'Proctor',
+    persona: 'You are the event proctor.',
+  });
+  cohortsLib.ensureMembership(announce.id, proctor.id);
+  await postMessage({ channelId: announce.id, userId: proctor.id, body: body.trim(), bypassPolicy: true });
+  res.json({ ok: true });
+});
+
 const activeRuns = new Map(); // scenarioId -> handle
 app.post('/api/admin/scenarios/:id/run', requireAdmin, async (req, res) => {
   const sc = scenarios.getScenario(req.params.id);
@@ -567,6 +670,153 @@ app.post('/api/admin/scenarios/:id/stop', requireAdmin, (req, res) => {
   activeRuns.delete(req.params.id);
   res.json({ ok: true });
 });
+
+// ---------- Cohort + task helpers ----------
+
+function populateInstructionsIfEmpty(cohort) {
+  const channel = cohortsLib.getCohortChannel({
+    cohortId: cohort.id,
+    displayName: 'instructions',
+  });
+  if (!channel) return;
+  const existing = db.prepare('SELECT 1 FROM messages WHERE channel_id = ? LIMIT 1').get(channel.id);
+  if (existing) return;
+  const sc = scenarios.getScenario(cohort.scenarioId);
+  if (!sc) return;
+  const instr = sc.definition && sc.definition.instructions;
+  if (!instr) return;
+
+  const proctor = personas.ensureBot({
+    workspaceId: defaultWorkspaceId,
+    username: 'proctor',
+    displayName: 'Proctor',
+    persona: 'You are the event proctor.',
+  });
+  cohortsLib.ensureMembership(channel.id, proctor.id);
+
+  const lines = [];
+  if (instr.title) lines.push(`*${instr.title}*`);
+  if (instr.body) lines.push(instr.body);
+  if (Array.isArray(instr.links) && instr.links.length) {
+    lines.push('');
+    lines.push('Links:');
+    for (const l of instr.links) {
+      lines.push(`• ${l.label || l.url}: ${l.url}`);
+    }
+  }
+  // Suppress posting policy for the engine.
+  postMessage({
+    channelId: channel.id,
+    userId: proctor.id,
+    body: lines.join('\n'),
+    bypassPolicy: true,
+  }).catch((err) => console.warn('[cohort] instructions seed failed:', err.message));
+}
+
+async function fireStartTasksForRun(run) {
+  const sc = scenarios.getScenario(run.scenario_id);
+  if (!sc) return 0;
+  return tasks.fireTasks({
+    run,
+    scenario: sc,
+    trigger: 'start',
+    post: async ({ channel, persona, body }) => {
+      cohortsLib.ensureMembership(channel.id, persona.id);
+      await postMessage({ channelId: channel.id, userId: persona.id, body, bypassPolicy: true });
+    },
+    onError: (e) => console.warn('[tasks] fire error:', e.error),
+  });
+}
+
+async function fireFollowUpTasks({ run, followUps }) {
+  for (const t of followUps) {
+    const sc = scenarios.getScenario(run.scenario_id);
+    await tasks.fireTask({
+      run,
+      scenario: sc,
+      task: t,
+      post: async ({ channel, persona, body }) => {
+        cohortsLib.ensureMembership(channel.id, persona.id);
+        await postMessage({ channelId: channel.id, userId: persona.id, body, bypassPolicy: true });
+      },
+    });
+  }
+}
+
+function emitScoreUpdate(cohortId) {
+  const runs = cohortsLib.listRuns(cohortId).map((r, idx) => ({
+    rank: idx + 1,
+    userId: r.user_id,
+    displayName: r.display_name,
+    username: r.username,
+    avatarColor: r.avatar_color,
+    score: r.score,
+    hintsUsed: r.hints_used || 0,
+    lastActivityAt: r.last_activity_at,
+    completed: !!r.completed_at,
+  }));
+  io.to(`cohort:${cohortId}:scoreboard`).emit('scoreboard:update', { cohortId, runs });
+}
+
+/**
+ * Hook: a participant just sent `body` into a persona DM. If there's an active
+ * task for that run + persona, grade it and fire on_correct/on_wrong + follow-ups.
+ * Returns true if handled (grader claimed it).
+ */
+async function maybeGradePersonaDmReply({ user, channel, body }) {
+  if (!channel.is_dm || !channel.cohort_id) return false;
+  // Find the persona on the other side of this DM.
+  const other = db
+    .prepare(
+      `SELECT u.* FROM users u
+         JOIN channel_members m ON m.user_id = u.id
+        WHERE m.channel_id = ? AND u.is_bot = 1 AND u.id != ?`
+    )
+    .get(channel.id, user.id);
+  if (!other) return false;
+  const run = cohortsLib.getRun(channel.cohort_id, user.id);
+  if (!run) return false;
+  const sc = scenarios.getScenario(run.scenario_id);
+  if (!sc) return false;
+
+  const result = tasks.gradeReply({
+    run,
+    scenario: sc,
+    personaUsername: other.username,
+    attemptText: body,
+  });
+  if (!result.handled) return false;
+
+  // React in the DM as the persona.
+  if (result.correct) {
+    const head = result.firstBlood
+      ? `🩸 *First blood!* +${result.points} pts.`
+      : `✅ +${result.points} pts.`;
+    const reply = result.onCorrectReply || 'Correct.';
+    await postMessage({
+      channelId: channel.id,
+      userId: other.id,
+      body: `${head}\n${reply}`,
+      bypassPolicy: true,
+    });
+    emitScoreUpdate(channel.cohort_id);
+    if (result.followUps && result.followUps.length) {
+      // Reload run since score / state changed.
+      const refreshed = cohortsLib.getRun(channel.cohort_id, user.id);
+      await fireFollowUpTasks({ run: refreshed, followUps: result.followUps });
+    }
+  } else {
+    const reply = result.onWrongReply || 'Not quite.';
+    const tail = result.exhausted ? '\n(No more attempts on this one — moving on.)' : '';
+    await postMessage({
+      channelId: channel.id,
+      userId: other.id,
+      body: `❌ ${reply}${tail}`,
+      bypassPolicy: true,
+    });
+  }
+  return true;
+}
 
 // ---------- Socket.io ----------
 
@@ -633,14 +883,41 @@ io.on('connection', (socket) => {
       });
       if (typeof ack === 'function') ack({ ok: true, message: msg });
 
-      // Trigger AI personas only on top-level messages (not thread replies).
+      // 1. If this DM has an active task for this user, route to grader.
+      let handledAsTask = false;
       if (!parentId) {
-        maybeTriggerBots({ channel: ch, triggerMessage: { author: user.display_name, body: body.trim() } });
+        try {
+          handledAsTask = await maybeGradePersonaDmReply({
+            user,
+            channel: ch,
+            body: body.trim(),
+          });
+        } catch (err) {
+          console.error('grader error', err);
+        }
+      }
+
+      // 2. Otherwise, trigger AI personas (top-level only, no active task).
+      if (!parentId && !handledAsTask) {
+        maybeTriggerBots({
+          channel: ch,
+          triggerMessage: { author: user.display_name, body: body.trim() },
+        });
       }
     } catch (err) {
       console.error('message:send error', err);
       if (typeof ack === 'function') ack({ ok: false, error: err.message });
     }
+  });
+
+  socket.on('scoreboard:join', ({ cohortId }) => {
+    if (!cohortId) return;
+    const member = cohortsLib.getMembership(cohortId, user.id);
+    // Allow members + admins (admin token authoritatively gates the scoreboard page route too).
+    if (member) socket.join(`cohort:${cohortId}:scoreboard`);
+  });
+  socket.on('scoreboard:leave', ({ cohortId }) => {
+    if (cohortId) socket.leave(`cohort:${cohortId}:scoreboard`);
   });
 
   socket.on('thread:join', ({ messageId }) => {
@@ -750,7 +1027,19 @@ async function maybeTriggerBots({ channel, triggerMessage }) {
 app.get('/', (req, res) => {
   const user = getUserBySession(req);
   if (!user) return res.sendFile(path.join(__dirname, 'public', 'login.html'));
+  const cohort = cohortsLib.getUserPrimaryCohort(user.id);
+  if (!cohort) return res.sendFile(path.join(__dirname, 'public', 'join.html'));
   res.sendFile(path.join(__dirname, 'public', 'app.html'));
+});
+
+app.get('/join', (req, res) => {
+  const user = getUserBySession(req);
+  if (!user) return res.sendFile(path.join(__dirname, 'public', 'login.html'));
+  res.sendFile(path.join(__dirname, 'public', 'join.html'));
+});
+
+app.get('/scoreboard', (_req, res) => {
+  res.sendFile(path.join(__dirname, 'public', 'scoreboard.html'));
 });
 
 app.get('/admin', (_req, res) => {
